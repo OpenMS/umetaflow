@@ -54,7 +54,7 @@ def filter_dialog(df):
         )
     c1, c2 = st.columns(2)
     filter_annotation = c1.toggle("filter for annotation", False)
-    filter_annotation_type = c2.selectbox("annotation type", ["all", "Spectral Matcher", "SIRIUS", "MS2Query"], 0)
+    filter_annotation_type = c2.selectbox("annotation type", ["all", "Spectral Matcher", "SIRIUS", "MS2Query", "GNPS"], 0)
     # filter text
     filter_text = ""
     if rt[0] > df["RT"].min():
@@ -67,7 +67,7 @@ def filter_dialog(df):
         filter_text += f" ***m/z*** max = {mz[1]};"
     if filter_annotation:
         filter_text += f" **Annotations:** {filter_annotation_type};"
-        cols = ["SpectralMatch", "SIRIUS_", "CSI:FingerID", "CANOPUS", "MS2Query"]
+        cols = ["SpectralMatch", "SIRIUS_", "CSI:FingerID", "CANOPUS", "MS2Query", "GNPS_"]
         if filter_annotation_type == "all":
             mask = cols
         elif filter_annotation_type == "Spectral Matcher":
@@ -75,7 +75,9 @@ def filter_dialog(df):
         elif filter_annotation_type == "SIRIUS":
             mask = cols[1:4]
         elif filter_annotation_type == "MS2Query":
-            mask = [cols[-1]]
+            mask = [cols[4]]
+        elif filter_annotation_type == "GNPS":
+            mask = [cols[5]]
         df_annotation = df[
             [c for c in df.columns if any([c.startswith(k) for k in mask])]
         ].replace('', pd.NA).dropna(how="all")
@@ -350,6 +352,41 @@ def ms2query_summary(s):
             st.image(img, use_container_width=True)
 
 
+def gnps_summary(s):
+    """Display GNPS FBMN library match annotations for selected metabolite."""
+    s = s[s != ""]
+    if s.empty:
+        st.info("No GNPS annotations available for this metabolite.")
+        return
+
+    s.index = [
+        i.replace("GNPS_", "").replace("_", " ")
+        for i in s.index
+    ]
+    s.name = "GNPS Library Match"
+
+    c1, c2 = st.columns([0.6, 0.4])
+    with c1:
+        st.dataframe(s, use_container_width=True)
+    with c2:
+        if "SMILES" in s.index and s["SMILES"]:
+            try:
+                molecule = Chem.MolFromSmiles(s["SMILES"])
+                if molecule:
+                    img = Draw.MolToImage(molecule)
+                    st.image(img, use_container_width=True)
+            except:
+                pass
+        elif "INCHI" in s.index and s["INCHI"]:
+            try:
+                molecule = Chem.MolFromInchi(s["INCHI"])
+                if molecule:
+                    img = Draw.MolToImage(molecule)
+                    st.image(img, use_container_width=True)
+            except:
+                pass
+
+
 @st.cache_resource
 def plot_consensus_map(df):
     fig = go.Figure()
@@ -478,9 +515,9 @@ Displays key metrics and statistics for the selected metabolite, such as:
 - if it has been re-quantified
 
 **3. Annotations:**
-                    
-Each of the three annotation methods will be displayed in a separate panel (if data is available).
-                    
+
+Each of the annotation methods will be displayed in a separate panel (if data is available).
+
 **🎯 Spectral Matching**
 
 MS2 spectral matching based on in-house library. Here, multiple matches can be displayed together with the structure from SMILES (if available). Take a look at the score and mass error in ppm.
@@ -488,12 +525,16 @@ MS2 spectral matching based on in-house library. Here, multiple matches can be d
 **⭐ SIRIUS, CSI:FingerID & CANOPUS**
 
 Formula, structure and compound class predictions. If available, the structure will be displayed based on InChI determined from CSI:FingerID.
-                    
+
 **🤖 MS2Query**
 
 Predicted compound names structures and compound classes together with structure drawn from SMILES string.
 
 💡 In general, a score of > 0.7 can be considered a good match. Take a look at the precursor *m/z* difference. While a very small difference indicates an exact match, larger differences are valid and refer to chemical analogues.
+
+**🌐 GNPS FBMN**
+
+Library matches from GNPS Feature-Based Molecular Networking. Import your GraphML results via the GNPS FBMN page to annotate features with compound names, structures (SMILES/InChI), adducts, and match quality scores.
 
 **4. Quantification: 📈 Chromatograms & 📊 Intensities**
 

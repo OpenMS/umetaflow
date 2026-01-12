@@ -1251,6 +1251,13 @@ class Workflow(WorkflowManager):
             with st.expander(f"🤖 **MS2Query**", expanded=True):
                 ms2query_summary(ms2query)
 
+        gnps = metabolite[
+            [i for i in metabolite.index if i.startswith("GNPS_")]
+        ].replace('', pd.NA).dropna()
+        if not gnps.empty:
+            with st.expander(f"🌐 **GNPS FBMN**", expanded=True):
+                gnps_summary(gnps)
+
         # Chromatograms and Intensities
         chrom_data = get_chroms_for_each_sample(metabolite)
         chrom_fig = get_feature_chromatogram_plot(chrom_data)

@@ -19,6 +19,7 @@ if __name__ == '__main__':
         ],
         "Downstream": [
             st.Page(Path("content", "statistics.py"), title="Statistics", icon="📈"),
+            st.Page(Path("content", "gnps_fbmn.py"), title="GNPS FBMN", icon="🌐"),
         ]
     }
 
