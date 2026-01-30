@@ -16,7 +16,7 @@ dependencies:
     - pyopenms_viz==0.1.5
     - pyteomics==4.7.5
     - ms2query==1.5.3
-    - pyopenms==3.2
+    - pyopenms==3.3.0
     - numpy==1.24.4
     - rdkit==2023.9.4
     - plotly==6.0.0
