@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
   
 env:
-  OPENMS_VERSION: 3.5.0
+  OPENMS_VERSION: 3.2.0 
   PYTHON_VERSION: 3.11.0
   # Name of the installer
   APP_NAME: UmetaFLow
@@ -31,10 +31,12 @@ jobs:
     - name: Install Qt
       uses: jurplel/install-qt-action@v4
       with:
-        version: '6.8.3'
-        arch: 'win64_msvc2022_64'
-        archives: 'qtsvg qtimageformats qtbase'
+        version: '5.15.2' # 5.12.7 is broken https://bugreports.qt.io/browse/QTBUG-81715, > 5.15.2 is not available on official archives (https://github.com/miurahr/aqtinstall/issues/636)
+        host: 'windows' # default: win64_msvc2017_64
+        target: 'desktop'
+        install-deps: 'true'
         cache: 'false'
+        aqtversion: '==3.1.*'
 
     # https://github.com/marketplace/actions/visual-studio-shell
     - name: Set up Visual Studio shell
@@ -46,7 +48,7 @@ jobs:
       shell: bash
       run: |
         choco install ccache ninja -y --no-progress
-        # Use pre-installed cmake from runner (3.31.6) instead of forcing older version
+        choco install cmake --version=3.31.1 -y --no-progress --force
         ## GH CLI "SHOULD BE" installed. Sometimes I had to manually install nonetheless. Super weird.
         # https://github.com/actions/runner-images/blob/main/images/win/scripts/Installers/Install-GitHub-CLI.ps1
         echo "C:/Program Files (x86)/GitHub CLI" >> $GITHUB_PATH
@@ -103,7 +105,7 @@ jobs:
           # add third-party binaries to PATH
           # use flat THIRDPARTY structure
           mkdir -p _thirdparty
-          cp -R OpenMS/THIRDPARTY/Windows/x86_64/* _thirdparty/
+          cp -R OpenMS/THIRDPARTY/Windows/64bit/* _thirdparty/
           cp -R OpenMS/THIRDPARTY/All/* _thirdparty/
           # add third-party binaries to PATH
           for thirdpartytool in ${{ github.workspace }}/_thirdparty/*
