@@ -15,34 +15,47 @@ from src.metabolomicsresults import *
 class Workflow(WorkflowManager):
     # Setup pages for upload, parameter, execution and results.
     # For layout use any streamlit components such as tabs (as shown in example), columns, or even expanders.
+    WORKFLOW_NAME = "umetaflow"
+
     def __init__(self, workspace) -> None:
-        flag_file = Path(workspace, "umetaflow-expert-flag.txt")
+        # Fixed workflow name - expert mode is stored in params.json
+        super().__init__(self.WORKFLOW_NAME, workspace)
 
-        name = "UmetaFlow"
-        self.expert_mode = False
-        if flag_file.exists():
-            self.expert_mode = True
-            name = "UmetaFlow-Expert"
+    def _is_expert_mode(self) -> bool:
+        """Check if running in expert mode (stored in params)."""
+        return self.params.get("expert_mode", False)
 
-        # Initialize the parent class with the workflow name.
-        super().__init__(name, workspace)
+    def _get_sirius_path(self) -> str:
+        """Get SIRIUS path, discovering and caching if needed."""
+        # Check workspace-level cache first
+        config_file = self.workflow_dir.parent / "runtime-config.json"
+
+        if config_file.exists():
+            with open(config_file, 'r') as f:
+                config = json.load(f)
+                if 'sirius_path' in config:
+                    return config['sirius_path']
+
+        # Discover SIRIUS path
+        sirius_path = ''
+        possible_paths = [
+            str(Path("sirius")),  # anywhere
+            str(Path(sys.prefix, "bin", "sirius")),  # in current conda environment
+            str(Path(".", "sirius", "sirius.exe")),  # Windows executables
+        ]
+        for path in possible_paths:
+            if shutil.which(path) is not None:
+                sirius_path = path
+
+        # Cache to file (works in both UI and worker)
+        config = {'sirius_path': sirius_path}
+        with open(config_file, 'w') as f:
+            json.dump(config, f, indent=2)
+
+        return sirius_path
 
     def upload(self) -> None:
         return
-
-    def add_sirius_path_to_session_state(self):
-        if "sirius-path" not in st.session_state:
-            possible_paths = [  # potential SIRIUS locations in increasing priority
-                str(Path("sirius")),  # anywhere
-                str(Path(sys.prefix, "bin", "sirius")),  # in current conda environment
-                str(
-                    Path(".", "sirius", "sirius.exe")
-                ),  # in case of Windows executables
-            ]
-            st.session_state["sirius-path"] = ""
-            for path in possible_paths:
-                if shutil.which(path) is not None:
-                    st.session_state["sirius-path"] = path
 
     def configure_simple(self) -> None:
         cols = st.columns(4)
@@ -204,9 +217,9 @@ class Workflow(WorkflowManager):
             with cols[1]:
                 st.image(str(Path("assets", "sirius.png")), width=200)
             # SiriusExport
-            self.add_sirius_path_to_session_state()
+            sirius_path = self._get_sirius_path()
 
-            if st.session_state["sirius-path"]:
+            if sirius_path:
                 cols = st.columns([0.25, 0.25, 0.5])
                 with cols[0]:
                     self.ui.input_widget(
@@ -433,9 +446,9 @@ class Workflow(WorkflowManager):
                         help="Generate input files for SIRIUS from raw data and feature information using the OpenMS TOPP tool *SiriusExport*.",
                     )
                     self.ui.input_TOPP("SiriusExport")
-                self.add_sirius_path_to_session_state()
+                sirius_path = self._get_sirius_path()
 
-                if st.session_state["sirius-path"]:
+                if sirius_path:
                     st.markdown("**SIRIUS user login**")
                     cols = st.columns([0.25, 0.25, 0.5])
                     with cols[0]:
@@ -630,28 +643,20 @@ class Workflow(WorkflowManager):
                 )
 
     def configure(self) -> None:
-        if not self.expert_mode:
-            self.configure_simple()
-        # Else, configure expert mode
-        else:
+        if self._is_expert_mode():
             self.configure_expert()
+        else:
+            self.configure_simple()
 
     def format_simple_params(self) -> dict:
         """Takes the paramter file from simple configuration page and translate into one useable in this workflow."""
-        with open(
-            Path(self.workflow_dir, "..", "umetaflow", "params.json"), "r"
-        ) as f:
+        # Read from current workflow directory (same as where we save)
+        with open(Path(self.workflow_dir, "params.json"), "r") as f:
             simple = json.load(f)
 
-        expert_params_path = Path(
-            self.workflow_dir, "..", "umetaflow-expert", "params.json"
-        )
-        if expert_params_path.exists():
-            with open(expert_params_path, "r") as f:
-                expert = json.load(f)
-        else:
-            with open("default-parameters.json", "r") as f:
-                expert = json.load(f)["umetaflow-expert"]
+        # Load defaults for TOPP tool params
+        with open("default-parameters.json", "r") as f:
+            expert = json.load(f)["umetaflow-expert"]
 
         new = expert.copy()
 
@@ -753,7 +758,7 @@ class Workflow(WorkflowManager):
 
     def execution(self) -> None:
         # Check if run in expert mode, if not paramters need to be formatted to be compatible with this framework.
-        if self.expert_mode:
+        if self._is_expert_mode():
             self.logger.log("Running UmetaFlow with expert mode configuration.")
         else:
             self.params = self.format_simple_params()
@@ -963,8 +968,9 @@ class Workflow(WorkflowManager):
             )
             mzML = sorted(mzML)
 
-        self.add_sirius_path_to_session_state()
-        if st.session_state["sirius-path"]:
+        sirius_path = self._get_sirius_path()
+        run_sirius = False
+        if sirius_path:
             if (
                 self.params["run-sirius"]
                 or self.params["run-fingerid"]
@@ -977,11 +983,10 @@ class Workflow(WorkflowManager):
                     self.logger.log(
                         "WARNING: SIRIUS account info incomplete. SIRIUS will not be executed and features not annotated."
                     )
-                    st.session_state["sirius-path"] = ""
-            else:
-                st.session_state["sirius-path"] = ""
+                else:
+                    run_sirius = True
 
-        if self.params["export-sirius"] or st.session_state["sirius-path"]:
+        if self.params["export-sirius"] or run_sirius:
             self.logger.log("Exporting input files for SIRIUS.")
             sirius_ms_files = self.file_manager.get_files(mzML, "ms", "sirius-export")
             self.executor.run_topp(
@@ -992,11 +997,11 @@ class Workflow(WorkflowManager):
                     "out": sirius_ms_files,
                 },
             )
-            if st.session_state["sirius-path"]:
+            if run_sirius:
                 self.logger.log("Logging in to SIRIUS...")
                 self.executor.run_command(
                     [
-                        st.session_state["sirius-path"],
+                        sirius_path,
                         "login",
                         f"--email={self.params['sirius-user-email']}",
                         f"--password={self.params['sirius-user-password']}",
@@ -1013,7 +1018,7 @@ class Workflow(WorkflowManager):
                     if Path(ms).stat().st_size > 0:
                         project.mkdir(parents=True)
                         command = [
-                            st.session_state["sirius-path"],
+                            sirius_path,
                             "--input",
                             ms,
                             "--project",
@@ -1177,7 +1182,7 @@ class Workflow(WorkflowManager):
                             },
                         )
 
-        if st.session_state["sirius-path"]:
+        if run_sirius:
             self.executor.run_python("annotate-sirius", {"in": consensus_df})
 
         if self.params["run-ms2query"]:

@@ -9,6 +9,7 @@ from .ParameterManager import ParameterManager
 import sys
 import importlib.util
 import json
+import streamlit as st
 
 class CommandExecutor:
     """
@@ -25,30 +26,71 @@ class CommandExecutor:
         self.logger = logger
         self.parameter_manager = parameter_manager
 
+    def _get_max_threads(self) -> int:
+        """
+        Get max threads for current deployment mode.
+
+        In local mode, reads from parameter manager (persisted params.json).
+        In online mode, uses the configured value directly from settings.
+
+        Returns:
+            int: Maximum number of threads to use for parallel processing (minimum 1).
+        """
+        settings = st.session_state.get("settings", {})
+        max_threads_config = settings.get("max_threads", {"local": 4, "online": 2})
+
+        if settings.get("online_deployment", False):
+            value = max_threads_config.get("online", 2)
+        else:
+            default = max_threads_config.get("local", 4)
+            params = self.parameter_manager.get_parameters_from_json()
+            value = params.get("max_threads", default)
+
+        return max(1, int(value))
+
     def run_multiple_commands(
         self, commands: list[str]
-    ) -> None:
+    ) -> bool:
         """
         Executes multiple shell commands concurrently in separate threads.
 
         This method leverages threading to run each command in parallel, improving
-        efficiency for batch command execution. Execution time and command results are
-        logged if specified.
+        efficiency for batch command execution. The number of concurrent commands
+        is limited by the max_threads setting, which is distributed between
+        parallel command execution and per-tool thread allocation.
 
         Args:
             commands (list[str]): A list where each element is a list representing
                                         a command and its arguments.
+
+        Returns:
+            bool: True if all commands succeeded, False if any failed.
         """
+        # Get thread settings and calculate distribution
+        max_threads = self._get_max_threads()
+        num_commands = len(commands)
+        parallel_commands = min(num_commands, max_threads)
+
         # Log the start of command execution
-        self.logger.log(f"Running {len(commands)} commands in parallel...", 1)
+        self.logger.log(f"Running {num_commands} commands (max {parallel_commands} parallel, {max_threads} total threads)...", 1)
         start_time = time.time()
+
+        results = []
+        lock = threading.Lock()
+        semaphore = threading.Semaphore(parallel_commands)
+
+        def run_and_track(cmd):
+            with semaphore:
+                success = self.run_command(cmd)
+                with lock:
+                    results.append(success)
 
         # Initialize a list to keep track of threads
         threads = []
 
         # Start a new thread for each command
         for cmd in commands:
-            thread = threading.Thread(target=self.run_command, args=(cmd,))
+            thread = threading.Thread(target=run_and_track, args=(cmd,))
             thread.start()
             threads.append(thread)
 
@@ -58,9 +100,11 @@ class CommandExecutor:
 
         # Calculate and log the total execution time
         end_time = time.time()
-        self.logger.log(f"Total time to run {len(commands)} commands: {end_time - start_time:.2f} seconds", 1)
+        self.logger.log(f"Total time to run {num_commands} commands: {end_time - start_time:.2f} seconds", 1)
 
-    def run_command(self, command: list[str]) -> None:
+        return all(results)
+
+    def run_command(self, command: list[str]) -> bool:
         """
         Executes a specified shell command and logs its execution details.
 
@@ -77,36 +121,102 @@ class CommandExecutor:
         self.logger.log(f"Running command:\n"+' '.join(command)+"\nWaiting for command to finish...", 1)   
         start_time = time.time()
         
-        # Execute the command
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        # Execute the command with real-time output capture
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,  # Line buffered
+            universal_newlines=True
+        )
         child_pid = process.pid
         
         # Record the PID to keep track of running processes associated with this workspace/workflow
         # User can close the Streamlit app and return to a running workflow later
         pid_file_path = self.pid_dir / str(child_pid)
         pid_file_path.touch()
-        
-        # Wait for command completion and capture output
-        stdout, stderr = process.communicate()
-        
+
+        # Buffer for stderr - will only be written to minimal log if process fails
+        stderr_buffer: list[str] = []
+
+        # Real-time output capture
+        self._stream_output(process, stderr_buffer)
+
+        # Wait for process completion
+        process.wait()
+
         # Cleanup PID file
         pid_file_path.unlink()
 
         end_time = time.time()
         execution_time = end_time - start_time
-        # Format the logging prefix
-        self.logger.log(f"Process finished:\n"+' '.join(command)+f"\nTotal time to run command: {execution_time:.2f} seconds", 1)
-        
-        # Log stdout if present
-        if stdout:
-            self.logger.log(stdout.decode(), 2)
-        
-        # Log stderr and raise an exception if errors occurred
-        if stderr or process.returncode != 0:
-            error_message = stderr.decode().strip()
-            self.logger.log(f"ERRORS OCCURRED:\n{error_message}", 2)
 
-    def run_topp(self, tool: str, input_output: dict, custom_params: dict = {}) -> None:
+        # Log completion
+        self.logger.log(f"Process finished:\n"+' '.join(command)+f"\nTotal time to run command: {execution_time:.2f} seconds", 1)
+
+        # Check for errors
+        if process.returncode != 0:
+            # Write buffered stderr to minimal log only on failure
+            for line in stderr_buffer:
+                self.logger.log(f"STDERR: {line}", 0)
+            self.logger.log(f"ERROR: Command failed with exit code {process.returncode}: {command[0]}", 0)
+            return False
+        return True
+
+    def _stream_output(self, process: subprocess.Popen, stderr_buffer: list[str]) -> None:
+        """
+        Streams stdout and stderr from a running process in real-time to the logger.
+        This method runs in the workflow process, not the GUI thread, so it's safe to block.
+
+        Stderr is buffered and only logged to the detailed log (level 2) during execution.
+        The caller is responsible for writing buffered stderr to minimal log if the process fails.
+
+        Args:
+            process: The subprocess.Popen object to stream from
+            stderr_buffer: A list to accumulate stderr lines for conditional logging
+        """
+        def read_stdout():
+            """Read stdout in real-time"""
+            try:
+                for line in iter(process.stdout.readline, ''):
+                    if line:
+                        self.logger.log(line.rstrip(), 2)
+                    if process.poll() is not None:
+                        break
+            except Exception as e:
+                self.logger.log(f"Error reading stdout: {e}", 2)
+            finally:
+                process.stdout.close()
+
+        def read_stderr():
+            """Read stderr in real-time, buffering for conditional minimal log output"""
+            try:
+                for line in iter(process.stderr.readline, ''):
+                    if line:
+                        stderr_line = line.rstrip()
+                        stderr_buffer.append(stderr_line)
+                        # Log to detailed log only during execution
+                        self.logger.log(f"STDERR: {stderr_line}", 2)
+                    if process.poll() is not None:
+                        break
+            except Exception as e:
+                self.logger.log(f"Error reading stderr: {e}", 2)
+            finally:
+                process.stderr.close()
+
+        # Start threads to read stdout and stderr simultaneously
+        stdout_thread = threading.Thread(target=read_stdout, daemon=True)
+        stderr_thread = threading.Thread(target=read_stderr, daemon=True)
+
+        stdout_thread.start()
+        stderr_thread.start()
+
+        # Wait for both threads to complete
+        stdout_thread.join()
+        stderr_thread.join()
+
+    def run_topp(self, tool: str, input_output: dict, custom_params: dict = {}) -> bool:
         """
         Constructs and executes commands for the specified tool OpenMS TOPP tool based on the given
         input and output configurations. Ensures that all input/output file lists
@@ -125,6 +235,9 @@ class CommandExecutor:
             input_output (dict): A dictionary specifying the input/output parameter names (as key) and their corresponding file paths (as value).
             custom_params (dict): A dictionary of custom parameters to pass to the tool.
 
+        Returns:
+            bool: True if all commands succeeded, False if any failed.
+
         Raises:
             ValueError: If the lengths of input/output file lists are inconsistent,
                         except for single string inputs.
@@ -140,6 +253,11 @@ class CommandExecutor:
             n_processes = 1
         else:
             n_processes = max(io_lengths)
+
+        # Calculate threads per command based on max_threads setting
+        max_threads = self._get_max_threads()
+        parallel_commands = min(n_processes, max_threads)
+        threads_per_command = max(1, max_threads // parallel_commands)
 
         commands = []
 
@@ -167,7 +285,9 @@ class CommandExecutor:
             if tool in params.keys():
                 for k, v in params[tool].items():
                     command += [f"-{k}"]
-                    if v:
+                    # Skip only empty strings (pass flag with no value)
+                    # Note: 0 and 0.0 are valid values, so use explicit check
+                    if v != "" and v is not None:
                         if isinstance(v, str) and "\n" in v:
                             command += v.split("\n")
                         else:
@@ -175,11 +295,15 @@ class CommandExecutor:
             # Add custom parameters
             for k, v in custom_params.items():
                 command += [f"-{k}"]
-                if v:
+                # Skip only empty strings (pass flag with no value)
+                # Note: 0 and 0.0 are valid values, so use explicit check
+                if v != "" and v is not None:
                     if isinstance(v, list):
                         command += [str(x) for x in v]
                     else:
                         command += [str(v)]
+            # Add threads parameter for TOPP tools
+            command += ["-threads", str(threads_per_command)]
             commands.append(command)
 
             # check if a ini file has been written, if yes use it (contains custom defaults)
@@ -189,9 +313,9 @@ class CommandExecutor:
 
         # Run command(s)
         if len(commands) == 1:
-            self.run_command(commands[0])
+            return self.run_command(commands[0])
         elif len(commands) > 1:
-            self.run_multiple_commands(commands)
+            return self.run_multiple_commands(commands)
         else:
             raise Exception("No commands to execute.")
 
@@ -209,7 +333,7 @@ class CommandExecutor:
                 self.logger.log(f"Failed to kill process {pid}: {e}")
         
         shutil.rmtree(self.pid_dir, ignore_errors=True)
-        self.logger.log("WORKFLOW FINISHED - STOPPED MANUALLY")
+        self.logger.log("Workflow stopped.")
 
     def run_python(self, script_file: str, input_output: dict = {}) -> None:
         """
