@@ -269,7 +269,7 @@ if path.exists():
                 "metabolite"
             )
         metabolite = st.selectbox("select metabolite", df_auc.index)
-        fig = get_metabolite_fig(df_auc, metabolite, time_unit)
+        fig = get_metabolite_fig(df_auc, metabolite, time_unit, str(st.session_state.workspace))
         show_fig(fig, f"eic-{metabolite}")
 
     with tabs[3]:

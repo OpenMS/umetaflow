@@ -244,10 +244,10 @@ def get_auc_fig(df_auc):
 
 
 @st.cache_resource
-def get_metabolite_fig(df_auc, metabolite, time_unit):
+def get_metabolite_fig(df_auc, metabolite, time_unit, workspace):
     fig = go.Figure()
     for sample in df_auc.columns:
-        df = pd.read_feather(Path(st.session_state.workspace,
+        df = pd.read_feather(Path(workspace,
                              "extracted-ion-chromatograms", sample[:-4] + "ftr"))
         fig.add_trace(
             go.Scattergl(

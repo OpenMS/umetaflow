@@ -1257,7 +1257,7 @@ class Workflow(WorkflowManager):
                 ms2query_summary(ms2query)
 
         # Chromatograms and Intensities
-        chrom_data = get_chroms_for_each_sample(metabolite)
+        chrom_data = get_chroms_for_each_sample(metabolite, str(st.session_state.results_dir))
         chrom_fig = get_feature_chromatogram_plot(chrom_data)
         auc_fig = get_feature_intensity_plot(metabolite)
 

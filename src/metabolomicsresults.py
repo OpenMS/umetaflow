@@ -188,7 +188,7 @@ def metabolite_metrics(metabolite):
 
 
 @st.cache_data
-def get_chroms_for_each_sample(metabolite):
+def get_chroms_for_each_sample(metabolite, results_dir):
     # Get index of row in df where "metabolite" is equal to metabolite
     all_samples = [
         i.replace(".mzML", "") for i in metabolite.index if i.endswith("mzML")
@@ -198,7 +198,7 @@ def get_chroms_for_each_sample(metabolite):
         # Get feature ID for sample
         fid = metabolite[sample + ".mzML_IDs"]
         path = Path(
-            st.session_state.results_dir,
+            results_dir,
             "ffmid-df" if metabolite["re-quantified"] else "ffm-df",
             sample + ".parquet",
         )

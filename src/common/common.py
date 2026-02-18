@@ -173,11 +173,8 @@ def copy_demo_workspace(demo_name: str, target_path: Path) -> bool:
         if target_path.exists():
             shutil.rmtree(target_path)
 
-        # Use symlinks on Linux for efficiency
-        if OS_PLATFORM == "linux":
-            _symlink_tree(demo_path, target_path)
-        else:
-            shutil.copytree(demo_path, target_path)
+        # Always copy files to ensure workspace isolation between users
+        shutil.copytree(demo_path, target_path)
         return True
     except Exception:
         return False
@@ -607,25 +604,18 @@ def render_sidebar(page: str = "") -> None:
                         if st.button("Load Demo Data"):
                             demo_path = find_demo_workspace_path(selected_demo)
                             if demo_path:
-                                # Link or copy demo files to current workspace
+                                # Copy demo files to current workspace (always copy
+                                # to ensure full isolation between workspaces)
                                 for item in demo_path.iterdir():
                                     target = st.session_state.workspace / item.name
                                     if item.is_dir():
                                         if target.exists():
                                             shutil.rmtree(target)
-                                        # Use symlinks on Linux for efficiency
-                                        if OS_PLATFORM == "linux":
-                                            _symlink_tree(item, target)
-                                        else:
-                                            shutil.copytree(item, target)
+                                        shutil.copytree(item, target)
                                     else:
                                         if target.exists():
                                             target.unlink()
-                                        # Copy config files so they can be modified independently
-                                        if OS_PLATFORM == "linux" and item.name != "params.json" and item.suffix != ".ini":
-                                            target.symlink_to(item.resolve())
-                                        else:
-                                            shutil.copy2(item, target)
+                                        shutil.copy2(item, target)
                                 st.success(f"Demo data '{selected_demo}' loaded!")
                                 time.sleep(1)
                                 st.rerun()
