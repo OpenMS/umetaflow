@@ -624,9 +624,9 @@ class Workflow(WorkflowManager):
                     "export-gnps",
                     True,
                     "export files for GNPS FBMN and IIMN",
-                    help="Generate input files for GNPS feature based molecular networking (FBMN) and ion identity molecular networking (IIMN) from raw data and feature information using the OpenMS TOPP tool *GNPSExport*.",
+                    help="Generate input files for GNPS feature based molecular networking (FBMN) and ion identity molecular networking (IIMN) from raw data and feature information.",
                 )
-                self.ui.input_TOPP("GNPSExport")
+                self.ui.input_python("gnps_export")
             with t[3]:
                 self.ui.input_widget(
                     "run-ms2query",
@@ -956,7 +956,7 @@ class Workflow(WorkflowManager):
                 {"in": str(Path(self.file_manager.workflow_dir, "results"))},
             )
 
-            # Ensure mzML and featureXML file paths are ordered the same for SiriusExport and GNPSExport
+            # Ensure mzML and featureXML file paths are ordered the same for SiriusExport and GNPS export
             ffm = sorted(
                 [
                     str(p)
@@ -1112,12 +1112,12 @@ class Workflow(WorkflowManager):
                 },
             )
 
-            # Run GNPSExport
-            self.executor.run_topp(
-                "GNPSExport",
+            # Run GNPS export via pyopenms (replaces GNPSExport TOPP tool)
+            self.executor.run_python(
+                "gnps_export",
                 {
                     "in_cm": gnps_consensus,
-                    "in_mzml": self.file_manager.get_files(mzML, collect=True),
+                    "in_mzml": mzML,
                     "out": self.file_manager.get_files("MS2", "mgf", "gnps-export"),
                     "out_quantification": self.file_manager.get_files(
                         "feature-quantification", "txt", "gnps-export"

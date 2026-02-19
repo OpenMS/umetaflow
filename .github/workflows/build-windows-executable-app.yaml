@@ -14,7 +14,7 @@ env:
   # Define unique GUID for UpgradeCode
   APP_UpgradeCode: "b2d49692-dcc7-11ef-991a-0242ac140002"
   # Define needed TOPP tools here
-  TOPP_TOOLS: "HighResPrecursorMassCorrector MapRTTransformer FileFilter FileConverter FeatureFinderMetabo MapAlignerPoseClustering MetaboliteAdductDecharger FeatureFinderMetaboIdent FeatureLinkerUnlabeledKD IDMapper SiriusExport GNPSExport MetaboliteSpectralMatcher"
+  TOPP_TOOLS: "HighResPrecursorMassCorrector MapRTTransformer FileFilter FileConverter FeatureFinderMetabo MapAlignerPoseClustering MetaboliteAdductDecharger FeatureFinderMetaboIdent FeatureLinkerUnlabeledKD IDMapper SiriusExport MetaboliteSpectralMatcher"
 
 jobs:
   build-openms:

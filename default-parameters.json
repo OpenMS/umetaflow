@@ -42,7 +42,6 @@
         "sirius-structure-db": "BIO",
         "run-canopus": false,
         "export-gnps": false,
-        "GNPSExport": {},
         "run-ms2query": false
     }
 }
