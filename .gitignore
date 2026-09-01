@@ -12,3 +12,12 @@ python*
 gdpr_consent/node_modules/
 ms2query-models/
 example-data/ms2-libraries/GNPS-LIBRARY.mgf
+
+# OpenMS-Insight component render caches (created wherever the app is launched from)
+umetaflow_volcano_plot/
+umetaflow_pca_plot/
+umetaflow_clustered_heatmap/
+repro_volcano_plot/
+
+# Local test data pulled from Metabolomics Workbench
+test-data-workbench/

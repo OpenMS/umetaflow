@@ -19,6 +19,14 @@ if __name__ == '__main__':
         ],
         "Downstream": [
             st.Page(Path("content", "statistics.py"), title="Statistics", icon="📈"),
+        ],
+        "Downstream (OpenMS-Insight)": [
+            st.Page(Path("content", "downstream_filtering.py"), title="Filtering", icon="🧹"),
+            st.Page(Path("content", "downstream_imputation.py"), title="Imputation", icon="🧩"),
+            st.Page(Path("content", "downstream_normalization.py"), title="Normalization", icon="⚖️"),
+            st.Page(Path("content", "downstream_statistics.py"), title="Statistical Inference", icon="🔬"),
+            st.Page(Path("content", "downstream_results.py"), title="Volcano / PCA / Heatmap", icon="📊"),
+            st.Page(Path("content", "downstream_kegg_pathway.py"), title="KEGG Pathway", icon="🧬"),
         ]
     }
 

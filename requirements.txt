@@ -25,3 +25,8 @@ ms2query==1.5.3
 rdkit==2023.9.4
 torch==2.5.0
 scikit-learn
+
+# OpenMS-Insight integration (Downstream statistics/enrichment)
+openms-insight>=0.1.13
+polars
+requests
