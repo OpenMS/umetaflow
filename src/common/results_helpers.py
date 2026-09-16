@@ -35,7 +35,17 @@ def _load_abundance_data(workspace_path: str, mtime: float) -> tuple:
 
     sample_cols = [c for c in df.columns if c.endswith(".mzML")]
 
-    pivot_df = df[sample_cols].copy()
+    # Carry along everything else (RT/mz/quality, and crucially any annotation columns
+    # like "MS1 annotation", "MS2 annotation", "MS2Query_analog_compound_name", or SIRIUS's
+    # "CSI:FingerID_..._name") so KEGG lookups and result tables further downstream have
+    # something to key off of. Only the internal per-file "<file>.mzML_IDs" bookkeeping
+    # columns are dropped, since openms_insight's analysis functions key strictly off the
+    # sample_id columns listed in metadata and pass everything else through untouched.
+    passthrough_cols = [
+        c for c in df.columns if c not in sample_cols and not c.endswith("_IDs")
+    ]
+
+    pivot_df = df[sample_cols + passthrough_cols].copy()
     pivot_df.insert(0, ID_COLUMN, df.index)
     pivot_df = pivot_df.reset_index(drop=True)
 

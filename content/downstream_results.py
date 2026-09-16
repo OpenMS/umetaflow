@@ -61,6 +61,19 @@ with tab_volcano:
         if volcano_df.empty:
             st.info("No features left to plot after filtering out non-finite/extreme log2FC values.")
         else:
+            # VolcanoPlot has no built-in point cap (unlike Heatmap's min_points), and
+            # rendering the full feature set (can be tens of thousands of rows) has been
+            # observed to crash the whole Streamlit process, not just the browser tab.
+            # Cap what's actually sent to the component, keeping the most significant
+            # points first (lowest p-adj) since those are what a volcano plot is for.
+            MAX_VOLCANO_POINTS = 5000
+            if len(volcano_df) > MAX_VOLCANO_POINTS:
+                st.info(
+                    f"Showing the {MAX_VOLCANO_POINTS:,} most significant of {len(volcano_df):,} "
+                    "features (by p-adj) to keep the plot responsive."
+                )
+                volcano_df = volcano_df.nsmallest(MAX_VOLCANO_POINTS, "p-adj")
+
             volcano_pl_lazy = pl.from_pandas(volcano_df).lazy()
 
             fc_thresh = st.slider("log2 Fold Change threshold", 0.5, 3.0, 1.0, 0.1, key="volcano_fc")
@@ -68,6 +81,7 @@ with tab_volcano:
 
             volcano_component = VolcanoPlot(
                 cache_id="umetaflow_volcano_plot",
+                cache_path=str(workspace),
                 data=volcano_pl_lazy,
                 log2fc_column="log2FC",
                 pvalue_column="p-adj",
@@ -129,6 +143,7 @@ with tab_pca:
             try:
                 pca_component = PCAPlot(
                     cache_id="umetaflow_pca_plot",
+                    cache_path=str(workspace),
                     data=pca_lazy,
                     metadata=metadata_pl,
                     sample_id_field="sample_id",

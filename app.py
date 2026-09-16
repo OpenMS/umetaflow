@@ -26,6 +26,7 @@ if __name__ == '__main__':
             st.Page(Path("content", "downstream_normalization.py"), title="Normalization", icon="⚖️"),
             st.Page(Path("content", "downstream_statistics.py"), title="Statistical Inference", icon="🔬"),
             st.Page(Path("content", "downstream_results.py"), title="Volcano / PCA / Heatmap", icon="📊"),
+            st.Page(Path("content", "downstream_kegg_pathway.py"), title="KEGG Pathway", icon="🧬"),
         ]
     }
 

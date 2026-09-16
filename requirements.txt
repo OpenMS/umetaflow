@@ -26,6 +26,8 @@ rdkit==2023.9.4
 torch==2.5.0
 scikit-learn
 
-# OpenMS-Insight integration (Downstream statistics)
+# OpenMS-Insight integration (Downstream statistics, KEGG pathway)
 openms-insight>=0.1.13
 polars
+requests
+pubchempy
