@@ -69,7 +69,7 @@ jobs:
       uses: actions/cache@v4
       with:
         path: ${{ github.workspace }}/OpenMS/contrib
-        key: ${{ runner.os }}-contrib3
+        key: ${{ runner.os }}-contrib-${{ env.OPENMS_VERSION }}
 
     - name: Load contrib build
       if: steps.cache-contrib-win.outputs.cache-hit != 'true'
@@ -77,8 +77,9 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         cd OpenMS/contrib
-        # Download the file using the URL fetched from GitHub
-        gh release download -R OpenMS/contrib --pattern 'contrib_build-Windows.tar.gz'
+        # Download the contrib release that matches the OpenMS release built here. The
+        # latest contrib release is a build for OpenMS develop and does not fit it.
+        gh release download release/${{ env.OPENMS_VERSION }} -R OpenMS/contrib --pattern 'contrib_build-Windows.tar.gz'
         # Extract the archive
         7z x -so contrib_build-Windows.tar.gz | 7z x -si -ttar
         rm contrib_build-Windows.tar.gz
