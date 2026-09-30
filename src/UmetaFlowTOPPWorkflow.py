@@ -1113,8 +1113,9 @@ class Workflow(WorkflowManager):
             )
 
             # Run GNPSExport
-            self.executor.run_topp(
-                "GNPSExport",
+            if self.params["export-gnps"]:
+                self.executor.run_topp(
+                    "GNPSExport",
                 {
                     "in_cm": gnps_consensus,
                     "in_mzml": self.file_manager.get_files(mzML, collect=True),
