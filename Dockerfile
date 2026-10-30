@@ -224,9 +224,11 @@ RUN if [ -n "$GH_TOKEN" ]; then \
         echo "GH_TOKEN is set, proceeding to download the release asset..."; \
         # The newest run on main that has the Windows installer; a failed macOS or
         # Linux job in the same run must not fall back to an older installer.
-        for run in $(gh run list -R ${GITHUB_USER}/${GITHUB_REPO} -b main -e push -s completed -w "Build desktop app" -L 20 --json databaseId -q '.[].databaseId'); do \
+        for run in $(gh run list -R ${GITHUB_USER}/${GITHUB_REPO} -b main -e push -s completed -w "Build desktop app" -L 100 --json databaseId -q '.[].databaseId'); do \
             gh run download -R ${GITHUB_USER}/${GITHUB_REPO} $run -n OpenMS-App-Electron --dir /app && break; \
         done; \
+        # A missing installer only hides the Windows download button; it does not fail the image.
+        ls /app/*-Setup.exe 2>/dev/null || echo "WARNING: no Windows installer found in the last 100 desktop runs on main."; \
     else \
         echo "GH_TOKEN is not set, skipping the release asset download."; \
     fi
