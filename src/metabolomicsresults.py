@@ -1,5 +1,7 @@
 import streamlit as st
 from pathlib import Path
+import shutil
+import tempfile
 import zipfile
 
 from rdkit import Chem
@@ -445,15 +447,28 @@ def download_section(workflow_dir):
     if st.session_state.location == "local":
         with st.popover("📤 Export", use_container_width=True):
             export_dir = export_folder_input("umetaflow-results")
+            no_folder = not st.session_state["export_dir"].strip()
+            if no_folder:
+                st.warning("Enter an export folder.")
             if st.button(
                 "📤 Export", type="primary", use_container_width=True,
-                disabled=not zip_path.exists(),
+                disabled=no_folder or not zip_path.exists(),
             ):
                 target = Path(export_dir, "UmetaFlow-results")
                 try:
                     with zipfile.ZipFile(zip_path) as zf:
+                        bad = zf.testzip()
+                        if bad is not None:
+                            raise zipfile.BadZipFile(f"corrupt member {bad}")
                         files = [i for i in zf.infolist() if not i.is_dir()]
-                        zf.extractall(target)
+                        # Extract next to the target first, so a failure
+                        # leaves the export folder as it was.
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        with tempfile.TemporaryDirectory(
+                            dir=target.parent, prefix=".umetaflow-export-"
+                        ) as tmp:
+                            zf.extractall(tmp)
+                            shutil.copytree(tmp, target, dirs_exist_ok=True)
                     st.success(f"Exported {len(files)} files to **{target}**.")
                 except (OSError, zipfile.BadZipFile) as e:
                     st.error(f"Export failed: {e}")

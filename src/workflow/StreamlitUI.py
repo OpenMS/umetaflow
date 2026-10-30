@@ -1459,7 +1459,9 @@ The workflow includes the **OpenMS {version}** TOPP tools {tools} as well as Pyt
                         st.session_state["previous_dir"],
                         multiple=False,
                     )
-                    if picked:
+                    if len(picked) > 1:
+                        st.error(f"Select one {name} only.")
+                    elif picked:
                         st.session_state[path_key] = str(picked[0])
                         st.session_state["previous_dir"] = Path(picked[0]).parent
             c2.text_input(name, key=path_key)
@@ -1484,9 +1486,21 @@ The workflow includes the **OpenMS {version}** TOPP tools {tools} as well as Pyt
                             shutil.rmtree(staging)
                         staging.mkdir(parents=True)
                         shutil.copy2(source, Path(staging, source.name))
+                        # Swap via a backup, so a failed rename restores it.
+                        backup = dir_path.with_name(f"{dir_path.name}.bak")
+                        if backup.exists():
+                            shutil.rmtree(backup)
                         if dir_path.exists():
-                            shutil.rmtree(dir_path)
-                        staging.rename(dir_path)
+                            dir_path.rename(backup)
+                        try:
+                            staging.rename(dir_path)
+                        except OSError as e:
+                            if backup.exists():
+                                backup.rename(dir_path)
+                            st.error(f"Could not add the file: {e}")
+                        else:
+                            if backup.exists():
+                                shutil.rmtree(backup)
         else:
             upload = st.file_uploader(
                 name, file_type, False
