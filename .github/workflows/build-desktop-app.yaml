@@ -409,6 +409,19 @@ jobs:
     - name: Stage Python with the app's requirements
       run: electron/scripts/stage-python.sh "$PYTHON_VERSION" electron/payload requirements.txt
 
+    - name: Drop prebuilt DuckDB extensions (macOS)
+      # A dependency pulls in duckdb-extension-* wheels. Their binaries carry DuckDB's
+      # own signature after the Mach-O, so codesign rejects them, and re-signing
+      # would break DuckDB's check anyway. Without them, DuckDB downloads the
+      # extension on first use into ~/.duckdb.
+      if: runner.os == 'macOS'
+      run: |
+        py="electron/payload/python-$PYTHON_VERSION/bin/python3"
+        pkgs=$("$py" -m pip list --format=freeze | cut -d= -f1 | grep -iE '^duckdb[-_]extension' || true)
+        if [[ -n $pkgs ]]; then "$py" -m pip uninstall -y $pkgs; fi
+        left=$(find electron/payload -name '*.duckdb_extension')
+        [[ -z $left ]] || { echo "::error::DuckDB extensions left in the payload: $left"; exit 1; }
+
     - name: Copy the app into the payload
       run: |
         p=electron/payload
