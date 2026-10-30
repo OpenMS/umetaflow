@@ -222,7 +222,7 @@ RUN jq '.online_deployment = true' settings.json > tmp.json && mv tmp.json setti
 # Download the Windows installer built by the latest Windows workflow run on main.
 RUN if [ -n "$GH_TOKEN" ]; then \
         echo "GH_TOKEN is set, proceeding to download the release asset..."; \
-        gh run download -R ${GITHUB_USER}/${GITHUB_REPO} $(gh run list -R ${GITHUB_USER}/${GITHUB_REPO} -b main -e push -s success -w "Build executable for Windows" --json databaseId -q '.[0].databaseId') -n OpenMS-App-Electron --dir /app; \
+        gh run download -R ${GITHUB_USER}/${GITHUB_REPO} $(gh run list -R ${GITHUB_USER}/${GITHUB_REPO} -b main -e push -s success -w "Build desktop app" --json databaseId -q '.[0].databaseId') -n OpenMS-App-Electron --dir /app; \
     else \
         echo "GH_TOKEN is not set, skipping the release asset download."; \
     fi

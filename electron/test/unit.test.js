@@ -28,6 +28,15 @@ test("appEnvironment mirrors the MSI launcher", () => {
   assert.ok(entries.includes(path.join(dir, "share", "OpenMS", "THIRDPARTY", "Percolator")));
 });
 
+test("appEnvironment puts openms/bin on PATH when present", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "payload-"));
+  fs.mkdirSync(path.join(dir, "openms", "bin"), { recursive: true });
+  const env = payload.appEnvironment(dir);
+  const pathKey = Object.keys(env).find((k) => k.toUpperCase() === "PATH");
+  const entries = env[pathKey].split(path.delimiter);
+  assert.deepEqual(entries.slice(0, 2), [dir, path.join(dir, "openms", "bin")]);
+});
+
 test("pythonExecutable prefers the embedded interpreter", () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "payload-"));
   const exe = process.platform === "win32" ? "python.exe" : path.join("bin", "python3");
@@ -46,5 +55,9 @@ test("appEnvironment puts the bundled Python and its console scripts on PATH", (
   const env = payload.appEnvironment(dir, "/tmp/ws");
   const pathKey = Object.keys(env).find((k) => k.toUpperCase() === "PATH");
   const entries = env[pathKey].split(path.delimiter);
-  assert.deepEqual(entries.slice(0, 3), [dir, pyDir, path.join(pyDir, "Lib", "site-packages", "bin")]);
+  const expected =
+    process.platform === "win32"
+      ? [dir, pyDir, path.join(pyDir, "Lib", "site-packages", "bin")]
+      : [dir, path.join(pyDir, "bin")];
+  assert.deepEqual(entries.slice(0, expected.length), expected);
 });
