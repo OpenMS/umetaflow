@@ -1,5 +1,6 @@
 import streamlit as st
 from pathlib import Path
+import zipfile
 
 from rdkit import Chem
 from rdkit.Chem import Draw
@@ -10,7 +11,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 from itertools import cycle
 
-from src.common.common import show_fig, load_parquet
+from src.common.common import show_fig, load_parquet, export_folder_input
 
 COLOR_SCALE = [
     (0.00, "rgba(233, 233, 233, 1.0)"),
@@ -416,23 +417,7 @@ quality: %{customdata[5]}<br>
 
     return fig
 
-def download_section(workflow_dir):
-    with st.popover("⬇️ Downloads", use_container_width=True):
-        if st.button(
-            "Prepare files for download", use_container_width=True
-        ):
-            with open(
-                Path(workflow_dir, "results", "results.zip"), "rb"
-            ) as fp:
-                st.success("Files are ready.")
-                st.download_button(
-                    label="⬇️ Download Now",
-                    data=fp,
-                    file_name="UmetaFlow-results.zip",
-                    mime="application/zip",
-                    use_container_width=True,
-                )
-        st.markdown("""**Feature Matrix**:
+RESULT_FILES_INFO = """**Feature Matrix**:
                         
 The main result file with consensus feature meta data (*m/z*, retention time, charge, adduct), intensities, annotations and additional information such as original & consensus feature IDs (for mapping with sample feature map data) and re-quantification status. In **tsv** and **parquet** format.
 
@@ -451,8 +436,44 @@ Input files for SIRIUS in the **sirius-export** directory. Useful to run SIRIUS 
 **GNPS Input Files**
 
 Input files for GNPS FBMN and IIMN in the **gnps-export** directory.                 
-""")
-        
+"""
+
+
+def download_section(workflow_dir):
+    zip_path = Path(workflow_dir, "results", "results.zip")
+    # A local install writes the result files straight into a folder.
+    if st.session_state.location == "local":
+        with st.popover("📤 Export", use_container_width=True):
+            export_dir = export_folder_input("umetaflow-results")
+            if st.button(
+                "📤 Export", type="primary", use_container_width=True,
+                disabled=not zip_path.exists(),
+            ):
+                with zipfile.ZipFile(zip_path) as zf:
+                    files = [i for i in zf.infolist() if not i.is_dir()]
+                    target = Path(export_dir, "UmetaFlow-results")
+                    try:
+                        zf.extractall(target)
+                        st.success(f"Exported {len(files)} files to **{target}**.")
+                    except OSError as e:
+                        st.error(f"Export failed: {e}")
+            st.markdown(RESULT_FILES_INFO)
+        return
+    with st.popover("⬇️ Downloads", use_container_width=True):
+        if st.button(
+            "Prepare files for download", use_container_width=True
+        ):
+            with open(zip_path, "rb") as fp:
+                st.success("Files are ready.")
+                st.download_button(
+                    label="⬇️ Download Now",
+                    data=fp,
+                    file_name="UmetaFlow-results.zip",
+                    mime="application/zip",
+                    use_container_width=True,
+                )
+        st.markdown(RESULT_FILES_INFO)
+
 def help_section():
     st.markdown("""
 **Welcome to the UmetaFlow Result Dashboard!**

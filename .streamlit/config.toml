@@ -1,3 +1,7 @@
+[client]
+# Hides the "Deploy" button; the menu keeps only settings, print and about.
+toolbarMode = "minimal"
+
 [global]
 developmentMode = false
 
