@@ -12,6 +12,30 @@ import sys
 from src.metabolomicsresults import *
 
 
+class _StepFailed(Exception):
+    pass
+
+
+class _StopOnFailure:
+    """Executor wrapper that stops the workflow at the first failed tool or script."""
+
+    def __init__(self, executor) -> None:
+        self._executor = executor
+
+    def __getattr__(self, name):
+        return getattr(self._executor, name)
+
+    def run_topp(self, tool, *args, **kwargs) -> bool:
+        if not self._executor.run_topp(tool, *args, **kwargs):
+            raise _StepFailed(tool)
+        return True
+
+    def run_python(self, script_file, *args, **kwargs) -> bool:
+        if not self._executor.run_python(script_file, *args, **kwargs):
+            raise _StepFailed(script_file)
+        return True
+
+
 class Workflow(WorkflowManager):
     # Setup pages for upload, parameter, execution and results.
     # For layout use any streamlit components such as tabs (as shown in example), columns, or even expanders.
@@ -756,7 +780,19 @@ class Workflow(WorkflowManager):
             json.dump(new, f, indent=4)
         return new
 
-    def execution(self) -> None:
+    def execution(self) -> bool:
+        """Runs the workflow; True only when every tool and script succeeded."""
+        executor = self.executor
+        self.executor = _StopOnFailure(executor)
+        try:
+            return self._run_steps()
+        except _StepFailed as step:
+            self.logger.log(f"ERROR: {step} failed, workflow stopped.")
+            return False
+        finally:
+            self.executor = executor
+
+    def _run_steps(self) -> bool:
         # Check if run in expert mode, if not paramters need to be formatted to be compatible with this framework.
         if self._is_expert_mode():
             self.logger.log("Running UmetaFlow with expert mode configuration.")
@@ -784,7 +820,7 @@ class Workflow(WorkflowManager):
             self.logger.log(
                 "ERROR: Select at leat two mzML files to run this workflow."
             )
-            return
+            return False
 
         # # Get mzML input files from self.params.
         # mzML = self.file_manager.get_files(self.params["mzML-files"])
@@ -1203,6 +1239,7 @@ class Workflow(WorkflowManager):
 
         # ZIP all relevant files for Download
         self.executor.run_python("zip-result-files", {"in": consensus_df})
+        return True
 
     def results(self) -> None:
         # Set current results directory

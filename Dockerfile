@@ -14,9 +14,9 @@ ARG PORT=8501
 # GitHub token to download latest OpenMS executable for Windows from Github action artifact.
 ARG GITHUB_TOKEN
 # Streamlit app Github user name (to download artifact from).
-ARG GITHUB_USER=axelwalter
+ARG GITHUB_USER=OpenMS
 # Streamlit app Github repository name (to download artifact from).
-ARG GITHUB_REPO=umetaflow-gui
+ARG GITHUB_REPO=umetaflow
 
 USER root
 
@@ -219,10 +219,10 @@ RUN mamba run -n streamlit-env python hooks/hook-analytics.py
 # Set Online Deployment
 RUN jq '.online_deployment = true' settings.json > tmp.json && mv tmp.json settings.json
 
-# Download latest OpenMS App executable for Windows from Github actions workflow.
+# Download the Windows installer built by the latest Windows workflow run on main.
 RUN if [ -n "$GH_TOKEN" ]; then \
         echo "GH_TOKEN is set, proceeding to download the release asset..."; \
-        gh run download -R ${GITHUB_USER}/${GITHUB_REPO} $(gh run list -R ${GITHUB_USER}/${GITHUB_REPO} -b main -e push -s completed -w "Build executable for Windows" --json databaseId -q '.[0].databaseId') -n OpenMS-App --dir /app; \
+        gh run download -R ${GITHUB_USER}/${GITHUB_REPO} $(gh run list -R ${GITHUB_USER}/${GITHUB_REPO} -b main -e push -s completed -w "Build executable for Windows" --json databaseId -q '.[0].databaseId') -n OpenMS-App-Electron --dir /app; \
     else \
         echo "GH_TOKEN is not set, skipping the release asset download."; \
     fi

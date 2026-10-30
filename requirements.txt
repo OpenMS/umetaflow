@@ -13,6 +13,9 @@ pyopenms_viz==0.1.5
 streamlit==1.49.1
 streamlit-js-eval==0.1.7
 xlsxwriter
+# Same pin as the streamlit-template: pyarrow 26 needs NumPy 2 (numpy is pinned
+# to 1.24 above), and pyarrow 25 segfaults in st.data_editor once pyopenms is loaded.
+pyarrow==19.0.1
 
 # Redis Queue dependencies (for online mode)
 redis>=5.0.0

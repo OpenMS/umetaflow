@@ -12,3 +12,8 @@ python*
 gdpr_consent/node_modules/
 ms2query-models/
 example-data/ms2-libraries/GNPS-LIBRARY.mgf
+# Electron shell: dependencies, the staged app payload and built installers
+electron/node_modules/
+electron/payload/
+electron/dist/
+!electron/build/

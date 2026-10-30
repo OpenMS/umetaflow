@@ -28,9 +28,9 @@ UmetaFlow is further implemented as a [snakemake pipeline](https://github.com/NB
 
 ### Windows
 1. Visit the [UmetaFlow web app](https://abi-services.cs.uni-tuebingen.de/umetaflow/)
-2. Click on **Download for Windows** button and download zip file
-3. Extract zip file
-4. Run the app by executing `UmetaFlow`
+2. Click on **Download for Windows** and download `UmetaFlow-Setup.exe`
+3. Run the installer (per user, no admin rights needed)
+4. Start UmetaFlow from the desktop icon or the start menu
 
 ## Quickstart
 
