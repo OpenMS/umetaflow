@@ -35,6 +35,11 @@ class _StopOnFailure:
             raise _StepFailed(script_file)
         return True
 
+    def run_command(self, command, *args, **kwargs) -> bool:
+        if not self._executor.run_command(command, *args, **kwargs):
+            raise _StepFailed(command[0])
+        return True
+
 
 class Workflow(WorkflowManager):
     # Setup pages for upload, parameter, execution and results.
