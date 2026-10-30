@@ -16,13 +16,11 @@ mzML_dir = Path(st.session_state.workspace, "mzML-files")
 local = st.session_state.location == "local"
 if local:
     tabs = st.tabs(["Files from local folder", "Example Data"])
-    local_tab, example_tab = tabs
 else:
     tabs = st.tabs(["⬆️ File Upload", "Example Data", "Download mzML files"])
-    upload_tab, example_tab, download_tab = tabs
 
 if not local:
-    with upload_tab:
+    with tabs[0]:
         with st.form("mzML-upload", clear_on_submit=True):
             files = st.file_uploader(
                 "mzML files", accept_multiple_files=True)
@@ -36,7 +34,7 @@ if not local:
                     st.error("Nothing to add, please upload file.")
 
 # Example mzML files
-with example_tab:
+with tabs[1]:
     st.markdown("Example data set of bacterial cytosolic fractions. Bacillus subtilis cultures were treated with the antibiotic fosfomycin, which inhibits a step in the biosynthesis of petidoglycan (bacterial cell wall). The major accumulation product is UDP-GlcNAc [M+H]+ = 608.088 m/z.")
     _, c2, _ = st.columns(3)
     if c2.button("Load Example Data", type="primary", use_container_width=True):
@@ -46,7 +44,7 @@ with example_tab:
 
 # Local file upload option: via directory path
 if local:
-    with local_tab:
+    with tabs[0]:
         # with st.form("local-file-upload"):
         local_mzML_dir = st.text_input(
             "path to folder with mzML files")
@@ -58,7 +56,7 @@ if local:
             update_mzML_df(df_path, mzML_dir).to_csv(df_path, sep="\t", index=False)
             st.rerun()
 else:
-    with download_tab:
+    with tabs[2]:
         c1, c2 = st.columns(2)
         if c1.button("Get all mzML files in workspace as zip file.", use_container_width=True):
             zip_buffer = zip_files(Path(st.session_state.workspace, "mzML-files"))
