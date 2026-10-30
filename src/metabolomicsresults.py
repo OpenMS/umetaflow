@@ -449,14 +449,14 @@ def download_section(workflow_dir):
                 "📤 Export", type="primary", use_container_width=True,
                 disabled=not zip_path.exists(),
             ):
-                with zipfile.ZipFile(zip_path) as zf:
-                    files = [i for i in zf.infolist() if not i.is_dir()]
-                    target = Path(export_dir, "UmetaFlow-results")
-                    try:
+                target = Path(export_dir, "UmetaFlow-results")
+                try:
+                    with zipfile.ZipFile(zip_path) as zf:
+                        files = [i for i in zf.infolist() if not i.is_dir()]
                         zf.extractall(target)
-                        st.success(f"Exported {len(files)} files to **{target}**.")
-                    except OSError as e:
-                        st.error(f"Export failed: {e}")
+                    st.success(f"Exported {len(files)} files to **{target}**.")
+                except (OSError, zipfile.BadZipFile) as e:
+                    st.error(f"Export failed: {e}")
             st.markdown(RESULT_FILES_INFO)
         return
     with st.popover("⬇️ Downloads", use_container_width=True):

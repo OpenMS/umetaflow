@@ -49,5 +49,6 @@ module.exports = async (t) => {
   const files = fs.existsSync(exported) ? fs.readdirSync(exported) : [];
   t.log(`Export: ${files.length} entries in ${exported}`);
   await t.shot("export");
-  if (files.length === 0) throw new Error("Export: no files written");
+  if (!files.includes("meta-value-template.tsv")) throw new Error("Export: meta-value-template.tsv missing");
+  if (!files.some((f) => f.endsWith(".parquet"))) throw new Error("Export: feature matrix parquet missing");
 };

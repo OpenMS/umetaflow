@@ -1470,14 +1470,23 @@ The workflow includes the **OpenMS {version}** TOPP tools {tools} as well as Pyt
                     "Add file", key=f"{key}-add", type="primary",
                     use_container_width=True,
                 ):
-                    source = Path(st.session_state.get(path_key, "").strip())
-                    if source.is_file():
+                    source = Path(
+                        st.session_state.get(path_key, "").strip()
+                    ).expanduser()
+                    if not source.is_file():
+                        st.error(f"File not found: {source}")
+                    elif source.suffix.lower() != f".{file_type}":
+                        st.error(f"Expected a .{file_type} file: {source}")
+                    else:
+                        # Copy first, so a failed copy keeps the current file.
+                        staging = dir_path.with_name(f"{dir_path.name}.tmp")
+                        if staging.exists():
+                            shutil.rmtree(staging)
+                        staging.mkdir(parents=True)
+                        shutil.copy2(source, Path(staging, source.name))
                         if dir_path.exists():
                             shutil.rmtree(dir_path)
-                        dir_path.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(source, Path(dir_path, source.name))
-                    else:
-                        st.error(f"File not found: {source}")
+                        staging.rename(dir_path)
         else:
             upload = st.file_uploader(
                 name, file_type, False
