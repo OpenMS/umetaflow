@@ -8,9 +8,8 @@ on:
     types: [created]
   workflow_dispatch:
   
-# Add permissions block to allow upload to releases
 permissions:
-  contents: write
+  contents: read
 
 env:
   OPENMS_VERSION: 3.2.0 
@@ -189,6 +188,9 @@ jobs:
 
   build-executable:
     runs-on: windows-2022  # Pinned due to windows-2025 compatibility issues
+    # Write access only for uploading the installer to a release.
+    permissions:
+      contents: write
     needs: build-openms  
 
     steps:
