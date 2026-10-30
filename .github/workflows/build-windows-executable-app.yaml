@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 env:
-  OPENMS_VERSION: 3.2.0 
+  OPENMS_VERSION: 3.5.0
   PYTHON_VERSION: 3.11.0
   # Name of the installer
   APP_NAME: UmetaFlow
@@ -21,7 +21,7 @@ env:
 
 jobs:
   build-openms:
-    runs-on: windows-2022  # Pinned due to windows-2025 compatibility issues with CMake
+    runs-on: windows-2022
 
     steps:
     - name: Checkout
@@ -31,15 +31,13 @@ jobs:
         ref: release/${{ env.OPENMS_VERSION }}
         path: 'OpenMS'
 
-    - name: Install Qt
+    - name: Install Qt (Windows)
       uses: jurplel/install-qt-action@v4
       with:
-        version: '5.15.2' # 5.12.7 is broken https://bugreports.qt.io/browse/QTBUG-81715, > 5.15.2 is not available on official archives (https://github.com/miurahr/aqtinstall/issues/636)
-        host: 'windows' # default: win64_msvc2017_64
-        target: 'desktop'
-        install-deps: 'true'
+        version: '6.8.3'    ## Note this version is build with win64_msvc2022_64 and should always match what we use
+        arch: 'win64_msvc2022_64'
         cache: 'false'
-        aqtversion: '==3.1.*'
+        archives: 'qtsvg qtimageformats qtbase'
 
     # https://github.com/marketplace/actions/visual-studio-shell
     - name: Set up Visual Studio shell
@@ -51,7 +49,7 @@ jobs:
       shell: bash
       run: |
         choco install ccache ninja -y --no-progress
-        choco install cmake --version=3.31.1 -y --no-progress --force
+        choco install cmake --version=3.31.12 -y --no-progress --force
         ## GH CLI "SHOULD BE" installed. Sometimes I had to manually install nonetheless. Super weird.
         # https://github.com/actions/runner-images/blob/main/images/win/scripts/Installers/Install-GitHub-CLI.ps1
         echo "C:/Program Files (x86)/GitHub CLI" >> $GITHUB_PATH
@@ -80,8 +78,7 @@ jobs:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       run: |
         cd OpenMS/contrib
-        # Download the contrib release that matches the OpenMS release built here. The
-        # latest contrib release is a build for OpenMS develop and does not fit it.
+        # Download the file using the URL fetched from GitHub
         gh release download release/${{ env.OPENMS_VERSION }} -R OpenMS/contrib --pattern 'contrib_build-Windows.tar.gz'
         # Extract the archive
         7z x -so contrib_build-Windows.tar.gz | 7z x -si -ttar
@@ -115,7 +112,7 @@ jobs:
           # add third-party binaries to PATH
           # use flat THIRDPARTY structure
           mkdir -p _thirdparty
-          cp -R OpenMS/THIRDPARTY/Windows/64bit/* _thirdparty/
+          cp -R OpenMS/THIRDPARTY/Windows/x86_64/* _thirdparty/
           cp -R OpenMS/THIRDPARTY/All/* _thirdparty/
           # add third-party binaries to PATH
           for thirdpartytool in ${{ github.workspace }}/_thirdparty/*
@@ -136,9 +133,9 @@ jobs:
       shell: bash
       run: |
           mkdir $GITHUB_WORKSPACE/OpenMS/bld/
+          bash OpenMS/tools/ci/capture-env.sh -v $GITHUB_WORKSPACE/OpenMS/bld/CMakeCache.txt
           ctest --output-on-failure -V -S $GITHUB_WORKSPACE/OpenMS/tools/ci/cibuild.cmake
       env:
-          #OS_PREFIX_PATH: "${{ env.Qt5_DIR }}/lib/cmake;${{ env.Qt5_DIR }}"
           OPENMS_CONTRIB_LIBS: "${{ github.workspace }}/OpenMS/contrib"
           CI_PROVIDER: "GitHub-Actions"
           CMAKE_GENERATOR: "Ninja"
@@ -148,6 +145,7 @@ jobs:
           ENABLE_TOPP_TESTING: "ON"
           ENABLE_CLASS_TESTING: "ON"
           WITH_GUI: "OFF"
+          WITH_PARQUET: "OFF"
           ADDRESS_SANITIZER: "Off"
           BUILD_TYPE: "Release"
           OPENMP: "Off"
