@@ -1027,7 +1027,7 @@ def tk_file_dialog(
         multiple (bool): If True, multiple files can be selected.
 
     Returns:
-        str: The path to the selected file.
+        tuple: The paths of the selected files (empty if none).
 
     Warning:
         This function is not avaliable in a streamlit cloud context.
@@ -1037,9 +1037,12 @@ def tk_file_dialog(
     root.withdraw()
     file_types.extend([("All files", "*.*")])
     file_path = filedialog.askopenfilename(
-        title=title, filetypes=file_types, initialdir=parent_dir, multiple=True
+        title=title, filetypes=file_types, initialdir=parent_dir, multiple=multiple
     )
     root.destroy()
+    # A single pick comes back as a string; return a tuple either way.
+    if not multiple:
+        return (file_path,) if file_path else ()
     return file_path
 
 def load_parquet(file):
