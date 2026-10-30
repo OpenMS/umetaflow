@@ -455,7 +455,11 @@ jobs:
         if [[ $RUNNER_OS == macOS ]]; then
           # Notarization runs in our afterSign hook, which retries Apple's flaky
           # stapling service instead of failing the build.
+          # dmgbuild sizes the image from the app's bytes and runs out of room
+          # with tens of thousands of small files; give it the payload plus 40%.
+          dmg_mb=$(( $(du -sm electron/payload | cut -f1) * 14 / 10 + 600 ))
           args+=(--mac dmg --arm64 "-c.dmg.artifactName=$APP_NAME-macOS-arm64.\${ext}"
+            "-c.dmg.size=${dmg_mb}m"
             -c.mac.notarize=false -c.afterSign=scripts/notarize.js)
           if [[ -n $MACOS_CERTIFICATE ]]; then
             export CSC_LINK="$MACOS_CERTIFICATE" CSC_KEY_PASSWORD="$MACOS_CERTIFICATE_PASSWORD"
