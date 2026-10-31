@@ -84,8 +84,9 @@ function appEnvironment(payload, workspacesDir) {
   // The macOS bundle is sealed by its signature and the AppImage is read-only;
   // their bytecode is compiled at build time instead.
   if (!isWindows) env.PYTHONDONTWRITEBYTECODE = "1";
-  // On macOS pyOpenMS and scikit-learn each ship their own libomp.dylib; the
-  // second one to load aborts the server ("OMP: Error #15") unless allowed.
+  // On macOS pyOpenMS and scikit-learn each ship their own libomp.dylib. The
+  // build links them to one file; should a second copy still load, this keeps
+  // it from aborting the server ("OMP: Error #15").
   if (process.platform === "darwin") env.KMP_DUPLICATE_LIB_OK = "TRUE";
   return env;
 }

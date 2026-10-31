@@ -423,6 +423,23 @@ jobs:
         left=$(find electron/payload -name '*.duckdb_extension')
         [[ -z $left ]] || { echo "::error::DuckDB extensions left in the payload: $left"; exit 1; }
 
+    - name: Share one OpenMP runtime (macOS)
+      # pyOpenMS and scikit-learn each bundle libomp.dylib. Two copies in one process
+      # abort it ("OMP: Error #15", or #179 when duplicates are allowed), so every
+      # other copy becomes a link to one file, which dyld then loads only once.
+      if: runner.os == 'macOS'
+      run: |
+        site=$(echo electron/payload/python-$PYTHON_VERSION/lib/python3.*/site-packages)
+        libs=$(find "$site" -name libomp.dylib -type f)
+        keep="$site/pyopenms/libomp.dylib"
+        [[ -f $keep ]] || keep=$(head -n1 <<<"$libs")
+        for lib in $libs; do
+          [[ $lib == "$keep" ]] && continue
+          rel=$(python3 -c 'import os, sys; print(os.path.relpath(sys.argv[1], os.path.dirname(sys.argv[2])))' "$keep" "$lib")
+          echo "$lib -> $rel"
+          ln -sf "$rel" "$lib"
+        done
+
     - name: Copy the app into the payload
       run: |
         p=electron/payload
