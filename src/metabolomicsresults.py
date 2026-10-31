@@ -15,7 +15,7 @@ import json
 
 from openms_insight import LinePlot, MirrorPlot, StateManager
 
-from src.common.insight_tables import cache_id_for, drop_stale_caches
+from src.common.insight_tables import cache_id_for, cache_ready, drop_stale_caches
 from src.feature_explorer import FeatureExplorer
 from src.ms2_viewer import LIBRARY_SIDE, QUERY_SIDE, load_ms2_data, peaks_frame
 
@@ -470,7 +470,7 @@ def ms2_section(metabolite, workflow_dir: Path) -> None:
                 )
             match = mirrored[pick]
             mirror_id = f"mirror_{cache_id}"
-            if not (cache_dir / mirror_id).is_dir():
+            if not cache_ready(cache_dir, mirror_id):
                 drop_stale_caches(cache_dir, "mirror_ms2_peaks", mirror_id)
                 MirrorPlot(
                     cache_id=mirror_id, data=peaks.lazy(), cache_path=str(cache_dir),
@@ -503,7 +503,7 @@ def ms2_section(metabolite, workflow_dir: Path) -> None:
                 pick = st.selectbox("spectrum", query_ids, format_func=lambda i: labels.get(i, str(i)),
                                     key="ms2-query-spectrum")
             line_id = f"ms2line_{cache_id}"
-            if not (cache_dir / line_id).is_dir():
+            if not cache_ready(cache_dir, line_id):
                 drop_stale_caches(cache_dir, "ms2line_ms2_peaks", line_id)
                 LinePlot(
                     cache_id=line_id, data=peaks.lazy(), cache_path=str(cache_dir),
