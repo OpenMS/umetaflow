@@ -81,13 +81,14 @@ function makeHelpers(app, page, baseUrl, out) {
 
     // Open a page by its URL path ("FLASHDeconvWorkflow") or by a title from
     // the navigation ("Workflow"); a title shared by several sections needs
-    // the URL path.
-    async open(target) {
+    // the URL path. A page that does heavy work on its first draw can pass a
+    // longer { timeout } for settling.
+    async open(target, opts) {
       await expandNav(page);
       const link = page.locator(`[data-testid="stSidebarNav"] a[href$="/${target}"]`);
       if ((await link.count()) === 1) await link.click();
       else await page.locator('[data-testid="stSidebarNav"] a', { hasText: target }).first().click();
-      await settle(page);
+      await settle(page, opts);
     },
 
     async clickTab(name) {
@@ -180,6 +181,18 @@ async function navTargets(page) {
   return [...new Set(hrefs.map((h) => new URL(h, "http://x").pathname.replace(/^\//, "")))];
 }
 
+// Quits the app; kills it when it does not quit, so a stuck window cannot keep
+// the test (and the CI job) running until its timeout.
+async function close(app) {
+  const proc = app.process();
+  const quit = app.close().then(() => true, () => true);
+  const late = new Promise((resolve) => setTimeout(resolve, 60000, false));
+  if (!(await Promise.race([quit, late]))) {
+    console.error("The app did not quit within 60s; killing it.");
+    proc.kill("SIGKILL");
+  }
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   fs.mkdirSync(args.out, { recursive: true });
@@ -219,7 +232,7 @@ async function main() {
       }
     }
   } finally {
-    await app.close().catch(() => {});
+    await close(app);
   }
   if (failed) throw new Error("one or more scenarios failed");
 }

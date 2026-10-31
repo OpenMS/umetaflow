@@ -567,6 +567,7 @@ jobs:
         exit $code
 
     - name: End-to-end test in the app window
+      timeout-minutes: 120
       # Drives the installed app with Playwright and opens every page, then runs this app's
       # workflows and checks their results (tests/e2e/electron-workflows.js).
       run: |
