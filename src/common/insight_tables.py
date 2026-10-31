@@ -15,20 +15,15 @@ import polars as pl
 import streamlit as st
 
 ROW_FIELD = "row"
-# Rows sampled when fingerprinting a dataframe
-_FINGERPRINT_SAMPLE_ROWS = 2000
 
 
 def fingerprint_dataframe(df: pd.DataFrame) -> str:
-    """Cheap content hash of a dataframe (shape, schema, column sums, sampled rows)."""
+    """Content hash of a dataframe (shape, schema and every cell)."""
     digest = hashlib.sha256()
     digest.update(repr((df.shape, [str(c) for c in df.columns], [str(t) for t in df.dtypes])).encode())
-    digest.update(df.select_dtypes(include="number").sum().to_numpy(dtype="float64").tobytes())
-    if len(df):
-        step = max(len(df) // _FINGERPRINT_SAMPLE_ROWS, 1)
-        rows = df.iloc[::step].astype(str)
-        digest.update(pd.util.hash_pandas_object(rows, index=False).values.tobytes())
-        digest.update(df.iloc[[-1]].astype(str).to_csv(index=False).encode())
+    # Every row: feature tables are small enough, and a sampled hash can miss
+    # a change in an unsampled row and reuse a stale cache
+    digest.update(pd.util.hash_pandas_object(df.astype(str), index=False).values.tobytes())
     return digest.hexdigest()
 
 
@@ -46,6 +41,11 @@ def cache_id_for(name: str, df: pd.DataFrame) -> str:
     browser new data each time and the component never leaves "Loading...".
     """
     return f"{name}_{fingerprint_dataframe(df)[:16]}"
+
+
+def cache_ready(cache_dir: Path, cache_id: str) -> bool:
+    """True once openms-insight finished a cache: it writes manifest.json last."""
+    return (Path(cache_dir) / cache_id / "manifest.json").is_file()
 
 
 def drop_stale_caches(cache_dir: Path, name: str, keep: str) -> None:
@@ -84,5 +84,5 @@ def to_polars(df: pd.DataFrame, column_overrides: dict | None = None) -> tuple[p
     df = df.rename(columns=renames)
     for column in df.columns:
         if df[column].dtype == object:
-            df[column] = df[column].map(lambda v: None if v is None or v != v else str(v))
+            df[column] = df[column].map(lambda v: None if pd.isna(v) else str(v))
     return pl.from_pandas(df).with_row_index(ROW_FIELD), column_definitions

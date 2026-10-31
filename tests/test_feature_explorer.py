@@ -68,3 +68,24 @@ def test_cache_id_changes_with_content():
     other.loc[0, "max intensity"] = 1.0
     assert cache_id_for("feature_table", table) == cache_id_for("feature_table", table.copy())
     assert cache_id_for("feature_table", table) != cache_id_for("feature_table", other)
+
+
+def test_sample_named_like_a_display_column_gets_its_own_column():
+    df = _matrix().rename(columns={"Treatment.mzML": "charge.mzML"})
+    table = build_feature_table(df)
+    assert table["charge"].tolist() == [1, 1, 2]
+    assert table["charge (sample)"].tolist() == [5.9e6, 0.0, 1.05e5]
+
+
+def test_to_polars_handles_pd_na_in_object_columns():
+    df = pd.DataFrame({"adduct": pd.array(["[M+H]+", pd.NA], dtype=object)})
+    pl_df, _ = to_polars(df)
+    assert pl_df["adduct"].to_list() == ["[M+H]+", None]
+
+
+def test_cache_ready_needs_manifest(tmp_path):
+    from src.common.insight_tables import cache_ready
+    (tmp_path / "t").mkdir()
+    assert not cache_ready(tmp_path, "t")
+    (tmp_path / "t" / "manifest.json").write_text("{}")
+    assert cache_ready(tmp_path, "t")
