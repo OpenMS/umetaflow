@@ -11,26 +11,27 @@ st.title("mzML Files")
 df_path = Path(st.session_state.workspace, "mzML-files.tsv")
 mzML_dir = Path(st.session_state.workspace, "mzML-files")
 
-tabs = ["⬆️ File Upload", "Example Data"]
-if st.session_state.location == "local":
-    tabs.append("Files from local folder")
-elif st.session_state.location == "online":
-    tabs.append("Download mzML files")
+# A local install reads files straight from disk, so it offers the local
+# folder instead of the browser upload, which streams every byte through the browser.
+local = st.session_state.location == "local"
+if local:
+    tabs = st.tabs(["Files from local folder", "Example Data"])
+else:
+    tabs = st.tabs(["⬆️ File Upload", "Example Data", "Download mzML files"])
 
-tabs = st.tabs(tabs)
-
-with tabs[0]:
-    with st.form("mzML-upload", clear_on_submit=True):
-        files = st.file_uploader(
-            "mzML files", accept_multiple_files=True)
-        _, c2, _ = st.columns(3)
-        if c2.form_submit_button("Add files to workspace", use_container_width=True, type="primary"):
-            if files:
-                save_uploaded_mzML(files)
-                update_mzML_df(df_path, mzML_dir).to_csv(df_path, sep="\t", index=False)
-                st.rerun()
-            else:
-                st.error("Nothing to add, please upload file.")
+if not local:
+    with tabs[0]:
+        with st.form("mzML-upload", clear_on_submit=True):
+            files = st.file_uploader(
+                "mzML files", accept_multiple_files=True)
+            _, c2, _ = st.columns(3)
+            if c2.form_submit_button("Add files to workspace", use_container_width=True, type="primary"):
+                if files:
+                    save_uploaded_mzML(files)
+                    update_mzML_df(df_path, mzML_dir).to_csv(df_path, sep="\t", index=False)
+                    st.rerun()
+                else:
+                    st.error("Nothing to add, please upload file.")
 
 # Example mzML files
 with tabs[1]:
@@ -42,8 +43,8 @@ with tabs[1]:
         st.rerun()
 
 # Local file upload option: via directory path
-if st.session_state.location == "local":
-    with tabs[2]:
+if local:
+    with tabs[0]:
         # with st.form("local-file-upload"):
         local_mzML_dir = st.text_input(
             "path to folder with mzML files")
@@ -54,7 +55,7 @@ if st.session_state.location == "local":
             copy_local_mzML_files_from_directory(local_mzML_dir)
             update_mzML_df(df_path, mzML_dir).to_csv(df_path, sep="\t", index=False)
             st.rerun()
-elif st.session_state.location == "online":
+else:
     with tabs[2]:
         c1, c2 = st.columns(2)
         if c1.button("Get all mzML files in workspace as zip file.", use_container_width=True):
