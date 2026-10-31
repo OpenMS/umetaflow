@@ -11,16 +11,7 @@ import plotly.graph_objects as go
 from itertools import cycle
 
 from src.common.common import show_fig, load_parquet
-
-COLOR_SCALE = [
-    (0.00, "rgba(233, 233, 233, 1.0)"),
-    (0.01, "rgba(243, 236, 166, 1.0)"),
-    (0.1, "rgba(255, 168, 0, 1.0)"),
-    (0.2, "rgba(191, 0, 191, 1.0)"),
-    (0.4, "rgba(68, 0, 206, 1.0)"),
-    (1.0, "rgba(33, 0, 101, 1.0)"),
-]
-
+from src.feature_explorer import FeatureExplorer
 
 def add_color_column(df):
     color_cycle = cycle(px.colors.qualitative.Plotly)
@@ -104,6 +95,7 @@ def filter_dialog(df):
 
 
 def metabolite_selection():
+    """Draw the feature table and return its FeatureExplorer (None if there are no features)."""
     df = load_parquet(
         Path(st.session_state.results_dir, "consensus-dfs", "feature-matrix.parquet")
     )
@@ -112,17 +104,6 @@ def metabolite_selection():
         st.error("FeatureMatrix is empty.")
         return None
 
-    sample_cols = sorted([col for col in df.columns if col.endswith(".mzML")])
-
-    # Insert a column with normalized intensity values to display as barchart column in dataframe
-    df.insert(
-        1,
-        "intensity",
-        df.apply(lambda row: [int(row[col]) for col in sample_cols], axis=1),
-    )
-    df["intensity"] = df["intensity"].apply(
-        lambda intensities: [i / max(intensities) for i in intensities]
-    )
     c1, c2, c3 = st.columns([0.5, 0.25, 0.25])
     if "feature-matrix-filtered" in st.session_state:
         if c2.button("❌ Reset", use_container_width=True):
@@ -136,40 +117,17 @@ def metabolite_selection():
         if not st.session_state["feature-matrix-filtered"].empty:
             df = st.session_state["feature-matrix-filtered"]
     c1.markdown(f"**Feature Matrix** ({df.shape[0]} metabolites)")
+    st.caption(
+        "Click a feature in the table or in the feature map (retention time vs *m/z*, "
+        "colored by the highest intensity across samples) to see its details. "
+        "Column headers sort and filter the table; its download button exports the filtered rows."
+    )
 
-    tab1, tab2 = st.tabs(["✅ **Selection**", "👀 View"])
-    with tab2:
-        fig = plot_consensus_map(df)
-        show_fig(fig, "consensus-map")
-    with tab1:
-        event = st.dataframe(
-            df,
-            column_order=["intensity", "RT", "mz", "charge", "adduct"],
-            hide_index=False,
-            column_config={
-                "intensity": st.column_config.BarChartColumn(
-                    width="small",
-                    help=", ".join(
-                        [
-                            str(Path(col).stem)
-                            for col in sorted(df.columns)
-                            if col.endswith(".mzML")
-                        ]
-                    ),
-                ),
-            },
-            height=300,
-            use_container_width=True,
-            on_select="rerun",
-            selection_mode="single-row",
-        )
-        rows = event.selection.rows
-        if rows:
-            return df.iloc[rows[0], :]
-        st.info(
-            "💡 Select a row (metabolite) in the feature matrix for more information."
-        )
-        return None
+    explorer = FeatureExplorer(
+        df, cache_dir=Path(st.session_state.results_dir, "insight-cache")
+    )
+    explorer.table()
+    return explorer
 
 
 def metabolite_metrics(metabolite):
@@ -350,72 +308,6 @@ def ms2query_summary(s):
             st.image(img, use_container_width=True)
 
 
-@st.cache_resource
-def plot_consensus_map(df):
-    fig = go.Figure()
-
-    df["mean"] = df.loc[:, [c for c in df.columns if c.endswith(".mzML")]].mean(axis=1)
-    df = df.sort_values("mean")
-
-    # define custom data for hovering
-    meta_values = [
-        df.index,
-        df["mz"].round(5),
-        df["RT"].round(),
-        df["mean"],
-        df["charge"],
-        df["quality"],
-    ]
-
-    hovertemplate = """
-<b>name: %{customdata[0]}<br>
-mz: %{customdata[1]}<br>
-RT: %{customdata[2]}<br>
-intensity: %{customdata[3]}<br>
-charge: %{customdata[4]}<br>
-quality: %{customdata[5]}<br>
-"""
-
-    if "adduct" in df.columns:
-        meta_values.append(df["adduct"])
-        hovertemplate += "adduct: %{customdata[6]}<br>"
-
-    for s in [col for col in df.columns if col.endswith("mzML")]:
-        meta_values.append(df[s])
-        hovertemplate += (
-            s[:-5] + ": %{customdata[" + str(len(meta_values) - 1) + "]}<br>"
-        )
-
-    customdata = np.stack(meta_values, axis=-1)
-
-    fig.add_trace(
-        go.Scattergl(
-            name="feature",
-            x=df["RT"],
-            y=df["mz"],
-            mode="markers",
-            marker_color=df["mean"],
-            marker_symbol="square",
-            marker_size=12,
-            customdata=customdata,
-            hovertemplate=hovertemplate,
-        )
-    )
-    fig.update_layout(
-        xaxis_title="retention time",
-        yaxis_title="m/z",
-        showlegend=False,
-        plot_bgcolor="rgb(255,255,255)",
-        margin=dict(l=0, r=0, t=0, b=0),
-    )
-    fig.update_traces(
-        showlegend=False,
-        marker_colorscale=COLOR_SCALE,
-        selector=dict(type="scattergl"),
-    )
-
-    return fig
-
 def download_section(workflow_dir):
     with st.popover("⬇️ Downloads", use_container_width=True):
         if st.button(
@@ -459,11 +351,11 @@ def help_section():
                 
 This page provides a detailed overview of the analysis results for your UmetaFlow run. Here's how to navigate and interpret the information.
 
-**1. Metabolite Selection**
+**1. Feature table and feature map**
 
-Use checkbox on the left side of the table to select a metabolite from the final FeatureMatrix or take a look at a scatter plot to check out consensus feature distribution.
+Click a row in the feature table, or a point in the feature map (retention time vs *m/z*), to select a metabolite. Both views stay in sync. The table has one intensity column per sample, the number of samples a feature was found in, and which tools annotated it. Sort or filter by any column header, and download the filtered table as CSV.
 
-The table contains an intensity column with bar charts for quick identificantion of differential metabolites. Hover over the column header to see the order of samples in the bar chart.
+The chromatograms of the selected feature in every sample are shown next to the feature map.
 
 💡 Use the option to **filter** the data.
 
