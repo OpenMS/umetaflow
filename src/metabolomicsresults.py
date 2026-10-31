@@ -11,7 +11,13 @@ import plotly.graph_objects as go
 from itertools import cycle
 
 from src.common.common import show_fig, load_parquet
+import json
+
+from openms_insight import LinePlot, MirrorPlot, StateManager
+
+from src.common.insight_tables import cache_id_for, drop_stale_caches
 from src.feature_explorer import FeatureExplorer
+from src.ms2_viewer import LIBRARY_SIDE, QUERY_SIDE, load_ms2_data, peaks_frame
 
 def add_color_column(df):
     color_cycle = cycle(px.colors.qualitative.Plotly)
@@ -369,6 +375,10 @@ Displays key metrics and statistics for the selected metabolite, such as:
 - adduct
 - if it has been re-quantified
 
+**🔬 MS2 spectrum**
+
+The MS2 spectrum recorded for the feature. If the in-house library matched it, the library spectrum is mirrored below it, with the peaks that pair up highlighted, the match score, the cosine similarity and the number of matched peaks.
+
 **3. Annotations:**
                     
 Each of the three annotation methods will be displayed in a separate panel (if data is available).
@@ -399,3 +409,114 @@ This section shows quantitative differences in your samples. Check out the chrom
 - Tables offer a search and download button in the top right corner
 - If new results don't appear, try to reset the filter (can contain old results)
 """)
+
+@st.cache_data(show_spinner=False)
+def _load_ms2_data(results_dir: str, library: str, tol_ppm: float, mtimes: tuple):
+    # mtimes only key the cache, so a re-run of the workflow invalidates it
+    return load_ms2_data(Path(results_dir), Path(library) if library else None, tol_ppm)
+
+
+def _ms2_inputs(workflow_dir: Path):
+    """MS2 library file and fragment tolerance (ppm) the spectral matching used."""
+    library_dir = Path(workflow_dir, "input-files", "ms2-library")
+    libraries = sorted(p for p in library_dir.glob("*") if p.is_file() and p.name != "external_files.txt") if library_dir.is_dir() else []
+    tol = 500.0  # MetaboliteSpectralMatcher default
+    for name in ("params-translated.json", "params.json"):
+        path = Path(workflow_dir, name)
+        if path.is_file():
+            try:
+                msm = json.loads(path.read_text()).get("MetaboliteSpectralMatcher", {})
+            except ValueError:
+                continue
+            if msm.get("algorithm:mass_error_unit", "ppm") == "ppm":
+                tol = float(msm.get("algorithm:frag_mass_error_value", tol))
+            break
+    return (libraries[0] if libraries else None), tol
+
+
+def ms2_section(metabolite, workflow_dir: Path) -> None:
+    """MS2 spectrum of the selected feature; library hits as a mirror plot."""
+    results_dir = Path(workflow_dir, "results")
+    library, tol = _ms2_inputs(Path(workflow_dir))
+    sources = [results_dir / "gnps-export" / "MS2.mgf", results_dir / "spectral-matcher" / "MS2-matches.mzTab"]
+    if library:
+        sources.append(library)
+    mtimes = tuple(p.stat().st_mtime_ns if p.exists() else 0 for p in sources)
+    data = _load_ms2_data(str(results_dir), str(library or ""), tol, mtimes)
+    if data is None:
+        return
+    with st.expander("🔬 **MS2 spectrum**", expanded=True):
+        query_ids = data.feature_spectra.get(str(metabolite.name), [])
+        matches = data.matches.get(str(metabolite.name), [])
+        if not query_ids:
+            st.info("No MS2 spectrum was recorded for this feature.")
+            return
+
+        cache_dir = Path(results_dir, "insight-cache")
+        peaks = peaks_frame(data)
+        cache_id = cache_id_for("ms2_peaks", data.peaks)
+        state = StateManager("umetaflow_ms2")
+        mirrored = [m for m in matches if m.library_id is not None]
+        labels = {row.spectrum_id: row.label for row in data.spectra.itertuples()}
+
+        if mirrored:
+            options = list(range(len(mirrored)))
+            pick = 0
+            if len(mirrored) > 1:
+                pick = st.selectbox(
+                    "library hit", options,
+                    format_func=lambda i: f"{mirrored[i].name} (score {mirrored[i].score:g})",
+                    key="ms2-library-hit",
+                )
+            match = mirrored[pick]
+            mirror_id = f"mirror_{cache_id}"
+            if not (cache_dir / mirror_id).is_dir():
+                drop_stale_caches(cache_dir, "mirror_ms2_peaks", mirror_id)
+                MirrorPlot(
+                    cache_id=mirror_id, data=peaks.lazy(), cache_path=str(cache_dir),
+                    filters_top={QUERY_SIDE: "spectrum_id"}, filters_bottom={LIBRARY_SIDE: "spectrum_id"},
+                    filter_defaults_top={QUERY_SIDE: -1}, filter_defaults_bottom={LIBRARY_SIDE: -1},
+                    interactivity={"ms2_peak": "peak_id"},
+                    x_column="mz", y_column="intensity",
+                    highlight_column="matched", annotation_column="label",
+                    title_top="feature MS2", title_bottom="library spectrum",
+                    x_label="m/z", y_label="relative intensity (%)",
+                )
+            state.set_selection(QUERY_SIDE, int(match.query_id))
+            state.set_selection(LIBRARY_SIDE, int(match.library_id))
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("library hit", match.name)
+            c2.metric("match score", f"{match.score:g}" if match.score is not None else "–")
+            c3.metric("cosine", f"{match.cosine:.2f}" if match.cosine is not None else "–")
+            c4.metric("matched peaks", match.matched_peaks)
+            st.caption(
+                f"Top: the feature's MS2 spectrum ({labels.get(match.query_id, '')}). Bottom, mirrored: the library "
+                f"spectrum of {match.name}. Peaks that pair up within {tol:g} ppm are highlighted (labeled from 5 % intensity). "
+                "The cosine uses square-root intensities of the paired peaks."
+            )
+            MirrorPlot(cache_id=mirror_id, cache_path=str(cache_dir))(
+                key="umetaflow_ms2_mirror", state_manager=state, height=420
+            )
+        else:
+            pick = query_ids[0]
+            if len(query_ids) > 1:
+                pick = st.selectbox("spectrum", query_ids, format_func=lambda i: labels.get(i, str(i)),
+                                    key="ms2-query-spectrum")
+            line_id = f"ms2line_{cache_id}"
+            if not (cache_dir / line_id).is_dir():
+                drop_stale_caches(cache_dir, "ms2line_ms2_peaks", line_id)
+                LinePlot(
+                    cache_id=line_id, data=peaks.lazy(), cache_path=str(cache_dir),
+                    filters={QUERY_SIDE: "spectrum_id"}, filter_defaults={QUERY_SIDE: -1},
+                    interactivity={"ms2_peak": "peak_id"},
+                    x_column="mz", y_column="intensity",
+                    title="feature MS2", x_label="m/z", y_label="relative intensity (%)",
+                )
+            state.set_selection(QUERY_SIDE, int(pick))
+            if matches:
+                st.caption(f"Library hit {matches[0].name}: its spectrum was not found in the uploaded library.")
+            else:
+                st.caption("No spectral library hit for this feature.")
+            LinePlot(cache_id=line_id, cache_path=str(cache_dir))(
+                key="umetaflow_ms2_line", state_manager=state, height=380
+            )

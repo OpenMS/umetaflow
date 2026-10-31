@@ -1243,6 +1243,9 @@ class Workflow(WorkflowManager):
         with st.expander("📝 **Summary**", expanded=True):
             metabolite_metrics(metabolite)
 
+        # MS2 spectrum, library hits as mirror plot
+        ms2_section(metabolite, self.workflow_dir)
+
         # Annotations
         spectralmatching = metabolite[
             [i for i in metabolite.index if i.startswith("SpectralMatch")]
