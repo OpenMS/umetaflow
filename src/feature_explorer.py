@@ -14,6 +14,7 @@ from openms_insight import Heatmap, StateManager, Table
 from src.common.insight_tables import (
     ROW_FIELD,
     cache_id_for,
+    cache_ready,
     default_cache_dir,
     drop_stale_caches,
     to_polars,
@@ -77,7 +78,10 @@ def build_feature_table(df: pd.DataFrame) -> pd.DataFrame:
     # Sample columns last: when the table is too wide, Tabulator folds the
     # trailing columns into a sub-row, and those should be the per-sample values
     for col in samples:
-        table[Path(col).stem] = intensities[col].round(0).to_numpy()
+        name = Path(col).stem
+        while name in table.columns:  # a sample named e.g. "charge" must not replace that column
+            name += " (sample)"
+        table[name] = intensities[col].round(0).to_numpy()
     return table
 
 
@@ -89,7 +93,7 @@ def _ensure_caches(table: pd.DataFrame, cache_dir: Path) -> tuple[str, str]:
     """Build the table and feature-map caches for ``table`` if they don't exist yet."""
     table_id = cache_id_for("feature_table", table)
     map_id = cache_id_for("feature_map", table)
-    if (cache_dir / table_id).is_dir() and (cache_dir / map_id).is_dir():
+    if cache_ready(cache_dir, table_id) and cache_ready(cache_dir, map_id):
         return table_id, map_id
     cache_dir.mkdir(parents=True, exist_ok=True)
     drop_stale_caches(cache_dir, "feature_table", table_id)
@@ -138,7 +142,9 @@ class FeatureExplorer:
         self.key = key
         self.cache_dir = Path(cache_dir) if cache_dir else default_cache_dir()
         self.table_id, self.map_id = _ensure_caches(build_feature_table(df), self.cache_dir)
-        self.state = StateManager(f"{key}_feature_explorer")
+        # One selection state per table content: a selected row index of the
+        # unfiltered matrix must not select a different feature after filtering
+        self.state = StateManager(f"{key}_feature_explorer_{self.table_id}")
 
     def table(self, height: int = 420) -> None:
         Table(cache_id=self.table_id, cache_path=str(self.cache_dir))(
