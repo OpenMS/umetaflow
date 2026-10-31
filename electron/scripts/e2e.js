@@ -185,11 +185,19 @@ async function navTargets(page) {
 // the test (and the CI job) running until its timeout.
 async function close(app) {
   const proc = app.process();
+  let timer;
   const quit = app.close().then(() => true, () => true);
-  const late = new Promise((resolve) => setTimeout(resolve, 60000, false));
-  if (!(await Promise.race([quit, late]))) {
+  const late = new Promise((resolve) => (timer = setTimeout(resolve, 60000, false)));
+  const quitInTime = await Promise.race([quit, late]);
+  clearTimeout(timer);
+  if (!quitInTime) {
     console.error("The app did not quit within 60s; killing it.");
-    proc.kill("SIGKILL");
+    // On Windows Playwright starts Electron through a shell, so kill the tree.
+    if (process.platform === "win32") {
+      require("child_process").spawnSync("taskkill", ["/pid", String(proc.pid), "/T", "/F"]);
+    } else {
+      proc.kill("SIGKILL");
+    }
   }
 }
 
