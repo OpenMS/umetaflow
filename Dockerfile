@@ -9,14 +9,14 @@
 
 FROM ubuntu:22.04 AS setup-build-system
 ARG OPENMS_REPO=https://github.com/OpenMS/OpenMS.git
-ARG OPENMS_BRANCH=release/3.2.0
+ARG OPENMS_BRANCH=release/3.5.0
 ARG PORT=8501
 # GitHub token to download latest OpenMS executable for Windows from Github action artifact.
 ARG GITHUB_TOKEN
 # Streamlit app Github user name (to download artifact from).
-ARG GITHUB_USER=axelwalter
+ARG GITHUB_USER=OpenMS
 # Streamlit app Github repository name (to download artifact from).
-ARG GITHUB_REPO=umetaflow-gui
+ARG GITHUB_REPO=umetaflow
 
 USER root
 
@@ -30,7 +30,7 @@ RUN apt-get install -y --no-install-recommends --no-install-suggests libboost-da
                                                                      libboost-regex1.74-dev \
                                                                      libboost-math1.74-dev \
                                                                      libboost-random1.74-dev
-RUN apt-get install -y --no-install-recommends --no-install-suggests qtbase5-dev libqt5svg5-dev libqt5opengl5-dev
+RUN apt-get install -y --no-install-recommends --no-install-suggests qt6-base-dev libqt6svg6-dev libqt6opengl6-dev libqt6openglwidgets6 libgl-dev
 
 # Install Github CLI
 RUN (type -p wget >/dev/null || (apt-get update && apt-get install wget -y)) \
@@ -69,7 +69,7 @@ WORKDIR /OpenMS
 RUN mkdir /thirdparty && \
     git submodule update --init THIRDPARTY && \
     cp -r THIRDPARTY/All/* /thirdparty && \
-    cp -r THIRDPARTY/Linux/64bit/* /thirdparty && \
+    cp -r THIRDPARTY/Linux/x86_64/* /thirdparty && \
     chmod -R +x /thirdparty
 ENV PATH="/thirdparty/LuciPHOr2:/thirdparty/MSGFPlus:/thirdparty/Sirius:/thirdparty/ThermoRawFileParser:/thirdparty/Comet:/thirdparty/Fido:/thirdparty/MaRaCluster:/thirdparty/MyriMatch:/thirdparty/OMSSA:/thirdparty/Percolator:/thirdparty/SpectraST:/thirdparty/XTandem:/thirdparty/crux:${PATH}"
 
@@ -219,10 +219,16 @@ RUN mamba run -n streamlit-env python hooks/hook-analytics.py
 # Set Online Deployment
 RUN jq '.online_deployment = true' settings.json > tmp.json && mv tmp.json settings.json
 
-# Download latest OpenMS App executable for Windows from Github actions workflow.
+# Download the Windows installer built by the latest Windows workflow run on main.
 RUN if [ -n "$GH_TOKEN" ]; then \
         echo "GH_TOKEN is set, proceeding to download the release asset..."; \
-        gh run download -R ${GITHUB_USER}/${GITHUB_REPO} $(gh run list -R ${GITHUB_USER}/${GITHUB_REPO} -b main -e push -s completed -w "Build executable for Windows" --json databaseId -q '.[0].databaseId') -n OpenMS-App --dir /app; \
+        # The newest run on main that has the Windows installer; a failed macOS or
+        # Linux job in the same run must not fall back to an older installer.
+        for run in $(gh run list -R ${GITHUB_USER}/${GITHUB_REPO} -b main -e push -s completed -w "Build desktop app" -L 100 --json databaseId -q '.[].databaseId'); do \
+            gh run download -R ${GITHUB_USER}/${GITHUB_REPO} $run -n OpenMS-App-Electron --dir /app && break; \
+        done; \
+        # A missing installer only hides the Windows download button; it does not fail the image.
+        ls /app/*-Setup.exe 2>/dev/null || echo "WARNING: no Windows installer found in the last 100 desktop runs on main."; \
     else \
         echo "GH_TOKEN is not set, skipping the release asset download."; \
     fi

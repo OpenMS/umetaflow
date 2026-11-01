@@ -335,7 +335,7 @@ class CommandExecutor:
         shutil.rmtree(self.pid_dir, ignore_errors=True)
         self.logger.log("Workflow stopped.")
 
-    def run_python(self, script_file: str, input_output: dict = {}) -> None:
+    def run_python(self, script_file: str, input_output: dict = {}) -> bool:
         """
         Executes a specified Python script with dynamic input and output parameters,
         optionally logging the execution process. The method identifies and loads
@@ -361,8 +361,9 @@ class CommandExecutor:
         if not path.exists():
             path = Path("src", "python-tools", script_file)
             if not path.exists():
-                self.logger.log(f"Script file not found: {script_file}")
-                
+                self.logger.log(f"ERROR: Script file not found: {script_file}")
+                return False
+
         # load DEFAULTS
         if path.parent not in sys.path:
             sys.path.append(str(path.parent))
@@ -373,7 +374,7 @@ class CommandExecutor:
         if defaults is None:
             self.logger.log(f"WARNING: No DEFAULTS found in {path.name}")
             # run command without params
-            self.run_command(["python", str(path)])
+            return self.run_command(["python", str(path)])
         elif isinstance(defaults, list):
             defaults = {entry["key"]: entry["value"] for entry in defaults}
             # load paramters from JSON file
@@ -388,6 +389,7 @@ class CommandExecutor:
             with open(tmp_params_file, "w", encoding="utf-8") as f:
                 json.dump(defaults, f, indent=4)
             # run command
-            self.run_command(["python", str(path), str(tmp_params_file)])
+            success = self.run_command(["python", str(path), str(tmp_params_file)])
             # remove tmp params file
             tmp_params_file.unlink()
+            return success
