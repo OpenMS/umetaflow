@@ -1,6 +1,6 @@
 import streamlit as st
 from src.common.common import page_setup
-from pathlib import Path
+from src.common.installers import render_installer_buttons
 import json
 
 params = page_setup(page="main")
@@ -18,23 +18,7 @@ cols[1].image("assets/umetaflow-logo.png")
 cols[1].image("assets/pyopenms-logo.png")
 
 
-if Path("UmetaFlow-Setup.exe").exists():
-    st.markdown(
-            """
-## Installation
-
-### Download for Windows
-
-Download and run the installer. It installs UmetaFlow for your user without admin rights; start it from the desktop icon or the start menu.
-        """)
-    with open("UmetaFlow-Setup.exe", "rb") as file:
-        st.download_button(
-                    label="Download for Windows",
-                    data=file,
-                    file_name="UmetaFlow-Setup.exe",
-                    mime="application/vnd.microsoft.portable-executable",
-                    type="primary"
-                )
+render_installer_buttons("## Installation\n\n### Download the desktop app")
 # st.image("assets/umetaflow-app-overview.png", width=800)
 
 st.markdown(
