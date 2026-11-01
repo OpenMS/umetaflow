@@ -1093,6 +1093,12 @@ def tk_file_dialog(
     return [result] if isinstance(result, str) else result
 
 
+def load_parquet(file):
+    if Path(file).exists():
+        return pd.read_parquet(file)
+    return pd.DataFrame()
+
+
 def export_folder_input(key: str) -> Path:
     """
     Show the folder that local exports are written to, with a browse button.
