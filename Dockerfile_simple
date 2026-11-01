@@ -100,8 +100,11 @@ RUN if [ -n "$GH_TOKEN" ]; then \
         for run in $(gh run list -R ${GITHUB_USER}/${GITHUB_REPO} -b main -e push -s completed -w "Build desktop app" -L 100 --json databaseId -q '.[].databaseId'); do \
             gh run download -R ${GITHUB_USER}/${GITHUB_REPO} $run -n OpenMS-App-Electron --dir /app && break; \
         done; \
+        # Saved under the name the Quickstart looks for when the release lookup fails.
+        f=$(ls /app/*-Setup.exe 2>/dev/null | head -n 1); \
+        if [ -n "$f" ] && [ "$f" != /app/OpenMS-App-Setup.exe ]; then mv "$f" /app/OpenMS-App-Setup.exe; fi; \
         # A missing installer only hides the Windows download button; it does not fail the image.
-        ls /app/*-Setup.exe 2>/dev/null || echo "WARNING: no Windows installer found in the last 100 desktop runs on main."; \
+        ls /app/OpenMS-App-Setup.exe 2>/dev/null || echo "WARNING: no Windows installer found in the last 100 desktop runs on main."; \
     else \
         echo "GH_TOKEN is not set, skipping the release asset download."; \
     fi
