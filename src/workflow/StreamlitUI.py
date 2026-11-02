@@ -17,6 +17,8 @@ from datetime import datetime
 from src.common.common import (
     OS_PLATFORM,
     TK_AVAILABLE,
+    export_files,
+    export_folder_input,
     tk_directory_dialog,
     tk_file_dialog,
 )
@@ -1101,6 +1103,9 @@ class StreamlitUI:
 
     def file_upload_section(self, custom_upload_function) -> None:
         custom_upload_function()
+        # A local install already has the input files on disk.
+        if st.session_state.location == "local":
+            return
         c1, _ = st.columns(2)
         if c1.button("⬇️ Download files", use_container_width=True):
             self.zip_and_download_files(Path(self.workflow_dir, "input-files"))
@@ -1434,17 +1439,79 @@ The workflow includes the **OpenMS {version}** TOPP tools {tools} as well as Pyt
         return "\n".join(markdown)
 
     def simple_file_uploader(self, key: str, file_type: str, name: str = "") -> None:
-        upload = st.file_uploader(
-            name, file_type, False
-        )
         dir_path = Path(self.workflow_dir, "input-files", key)
-        if upload:
-            if dir_path.exists():
-                shutil.rmtree(dir_path)
-            dir_path.mkdir(parents=True, exist_ok=True)
-            path = Path(dir_path, upload.name)
-            with open(path, "wb") as f:
-                f.write(upload.getbuffer())
+        # A local install picks the file from disk instead of the browser upload.
+        if st.session_state.location == "local":
+            path_key = f"{key}-local-path"
+            c1, c2, c3 = st.columns([0.08, 0.67, 0.25], gap="small")
+            with c1:
+                st.write("\n")
+                st.write("\n")
+                if st.button(
+                    "📁",
+                    key=f"{key}-browse",
+                    help=f"Choose the {name}.",
+                    disabled=not TK_AVAILABLE,
+                ):
+                    picked = tk_file_dialog(
+                        f"Select {name}",
+                        [(file_type, f"*.{file_type}")],
+                        st.session_state["previous_dir"],
+                        multiple=False,
+                    )
+                    if len(picked) > 1:
+                        st.error(f"Select one {name} only.")
+                    elif picked:
+                        st.session_state[path_key] = str(picked[0])
+                        st.session_state["previous_dir"] = Path(picked[0]).parent
+            c2.text_input(name, key=path_key)
+            with c3:
+                st.write("\n")
+                st.write("\n")
+                if st.button(
+                    "Add file", key=f"{key}-add", type="primary",
+                    use_container_width=True,
+                ):
+                    source = Path(
+                        st.session_state.get(path_key, "").strip()
+                    ).expanduser()
+                    if not source.is_file():
+                        st.error(f"File not found: {source}")
+                    elif source.suffix.lower() != f".{file_type}":
+                        st.error(f"Expected a .{file_type} file: {source}")
+                    else:
+                        # Copy first, so a failed copy keeps the current file.
+                        staging = dir_path.with_name(f"{dir_path.name}.tmp")
+                        if staging.exists():
+                            shutil.rmtree(staging)
+                        staging.mkdir(parents=True)
+                        shutil.copy2(source, Path(staging, source.name))
+                        # Swap via a backup, so a failed rename restores it.
+                        backup = dir_path.with_name(f"{dir_path.name}.bak")
+                        if backup.exists():
+                            shutil.rmtree(backup)
+                        if dir_path.exists():
+                            dir_path.rename(backup)
+                        try:
+                            staging.rename(dir_path)
+                        except OSError as e:
+                            if backup.exists():
+                                backup.rename(dir_path)
+                            st.error(f"Could not add the file: {e}")
+                        else:
+                            if backup.exists():
+                                shutil.rmtree(backup)
+        else:
+            upload = st.file_uploader(
+                name, file_type, False
+            )
+            if upload:
+                if dir_path.exists():
+                    shutil.rmtree(dir_path)
+                dir_path.mkdir(parents=True, exist_ok=True)
+                path = Path(dir_path, upload.name)
+                with open(path, "wb") as f:
+                    f.write(upload.getbuffer())
         if dir_path.exists():
             st.info([p.name for p in dir_path.iterdir()][0])
         else:

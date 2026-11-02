@@ -1,8 +1,8 @@
 {
     "app-name": "UmetaFlow",
-    "github-user": "axelwalter",
+    "github-user": "OpenMS",
     "version": "1.0.0",
-    "repository-name": "umetaflow-gui",
+    "repository-name": "umetaflow",
     "analytics": {
         "google-analytics": {
             "enabled": false,

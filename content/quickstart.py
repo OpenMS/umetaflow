@@ -1,6 +1,6 @@
 import streamlit as st
 from src.common.common import page_setup
-from pathlib import Path
+from src.common.installers import render_installer_buttons
 import json
 
 params = page_setup(page="main")
@@ -18,23 +18,7 @@ cols[1].image("assets/umetaflow-logo.png")
 cols[1].image("assets/pyopenms-logo.png")
 
 
-if Path("UmetaFlow-App.zip").exists():
-    st.markdown(
-            """
-## Installation
-
-### Download for Windows
-
-Simply download and extract the zip file. The folder contains an executable UmetaFlow file. No need to install anything.
-        """)
-    with open("UmetaFlow-App.zip", "rb") as file:
-        st.download_button(
-                    label="Download for Windows",
-                    data=file,
-                    file_name="UmetaFlow-App.zip",
-                    mime="archive/zip",
-                    type="primary"
-                )
+render_installer_buttons("## Installation\n\n### Download the desktop app")
 # st.image("assets/umetaflow-app-overview.png", width=800)
 
 st.markdown(
