@@ -19,7 +19,7 @@ pyarrow==19.0.1
 
 # Redis Queue dependencies (for online mode)
 redis>=5.0.0
-rq>=1.16.0
+rq>=3.0.0
 
 # Umetaflow specific
 streamlit-plotly-events==0.0.6
