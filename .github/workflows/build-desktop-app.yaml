@@ -375,7 +375,7 @@ jobs:
             runs-on: macos-15
           # Built on the oldest Ubuntu we support: the bundle needs glibc >= 2.35.
           - platform: Linux-x86_64
-            runs-on: self-hosted
+            runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-22.04' || 'self-hosted' }}
     runs-on: ${{ matrix.runs-on }}
     # Signing tens of thousands of payload files takes over two hours on macOS.
     timeout-minutes: 300
@@ -632,7 +632,7 @@ jobs:
   release:
     needs: [build-executable, macos-linux]
     if: github.event_name == 'release'
-    runs-on: self-hosted
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'self-hosted' }}
     permissions:
       contents: write
     steps:
