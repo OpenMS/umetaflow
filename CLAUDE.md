@@ -1,0 +1,335 @@
+# CLAUDE.md
+
+> **UmetaFlow** (untargeted metabolomics) is built on the OpenMS streamlit-template. The text below is the template's guide and applies to the framework (`src/workflow/`, `src/common/`, Docker, desktop). UmetaFlow's own code is `src/UmetaFlowTOPPWorkflow.py` (the workflow, slug `umetaflow`), the `content/umetaflow_*.py` pages, `src/python-tools/`, `src/plotting/`, `src/dataframes.py`, `src/eic.py`, `src/stats.py` and `src/metabolomicsresults.py`. UmetaFlow does not deploy to Kubernetes (`deploy.k8s.enabled: false` in `app.yaml`), so the template's `k8s/` is not part of this repository. The weekly `template-sync.yml` merges the template; merge those PRs with a merge commit, never squash.
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## What This Is
+
+**The standard framework for building web applications for mass spectrometry (MS) data analysis**, used across the OpenMS ecosystem for proteomics and metabolomics research. It wraps **OpenMS/pyOpenMS** (the leading open-source C++/Python library for computational MS) and its **TOPP tools** (~200 command-line tools for MS pipelines) into interactive Streamlit apps.
+
+Production apps built from this template: **quantms-web** (quantitative proteomics), **umetaflow** (untargeted metabolomics), **FLASHApp** (top-down proteomics).
+
+### MS Domain Context
+
+- **Input data**: mzML (raw spectra), featureXML (detected features), consensusXML (features linked across samples), idXML (peptide/protein IDs), traML (targeted transitions)
+- **Workflows chain TOPP tools**: e.g. `FeatureFinderMetabo` (detect LC-MS features) → `FeatureLinkerUnlabeledKD` (align across runs) → custom Python post-processing
+- **Proteomics** = peptide/protein ID + quantification (`MSGFPlusAdapter`, `FidoAdapter`, `ProteinQuantifier`); **metabolomics** = feature detection + annotation (`FeatureFinderMetabo`, `MetaboliteAdductDecharger`, `SiriusAdapter`)
+- **MS visualizations**: mass spectra (m/z vs intensity), chromatograms (RT vs intensity), peak maps (RT vs m/z heatmaps), isotope patterns, fragment ion annotations, volcano plots
+
+## Commands
+
+All commands run **from the repo root** — tests and the app resolve paths relative to CWD (`settings.json`, `content/…`, `example-data/…`).
+
+```bash
+# Setup. pytest and fakeredis are NOT in requirements.txt.
+pip install -r requirements.txt
+pip install pytest fakeredis
+
+# Run the app
+streamlit run app.py
+
+# Tests — three separate groups, no conftest.py and no pytest config anywhere
+python -m pytest test_gui.py tests/      # what ci.yml runs
+python -m pytest test.py                 # what workflow-tests.yml runs (needs network)
+python -m pytest                         # everything (default discovery finds all three)
+
+# Single file / test / parametrized case
+python -m pytest tests/test_topp_workflow_parameter.py
+python -m pytest tests/test_queue_manager_cancel.py::test_cancel_missing_job_returns_false
+python -m pytest "test_gui.py::test_launch[content/file_upload.py]"
+
+# Lint (gating in CI, but --errors-only so it is permissive)
+pylint $(git ls-files '*.py') --disable=C0103,C0114,C0301,C0411,W0212,W0631,W0602,W1514,W2402,E0401,E1101,F0001,R1732 --errors-only
+
+# Docker (full image: OpenMS + TOPP tools; Dockerfile_simple: pyOpenMS only)
+docker-compose up -d --build
+
+# Kubernetes. TWO roots, and the storage one goes first: it publishes the
+# StorageClass workspace-pvc.yaml claims, so applying the overlay alone leaves
+# every pod Pending. `apply -k` has no --enable-helm flag, hence the pipe.
+kubectl kustomize k8s/overlays/prod/          # render + validate
+kubectl kustomize --enable-helm k8s/storage/  # render + validate (needs helm)
+
+kubectl kustomize --enable-helm k8s/storage/ | kubectl apply -f -
+kubectl apply -k k8s/overlays/prod/
+```
+
+CI uses **Python 3.10** for all Linux test/lint jobs. Windows packaging uses 3.11; `requirements.txt` was compiled against 3.12.
+
+### Test suite shape
+
+- `test.py` — unittest, downloads an mzML from GitHub with **no skip guard** (fails offline).
+- `test_gui.py` — `streamlit.testing.v1.AppTest` smoke tests launching every page. `content/quickstart.py` is deliberately excluded (raises `StreamlitPageNotFoundError`).
+- `tests/*.py` — unit tests. Redis is never required: queue tests use `pytest.importorskip("fakeredis")` at module level and inject `FakeStrictRedis`. TOPP binaries are never required either — `run_topp` tests mock `run_command` and assert on the *built command list*.
+- Several tests swap `sys.modules['streamlit']` for a `MagicMock`, import the module under test, then purge `src.workflow.*` from `sys.modules` so `AppTest` still gets the real package. **Test ordering is load-bearing** — adding `pytest-xdist` or random ordering will break this.
+
+## Architecture
+
+```
+app.py                    # Entry point — registers pages via st.Page() in a dict
+settings.json             # App name/version, online_deployment, workspaces, threads, analytics, legal links
+default-parameters.json   # Default workspace params (keys must match widget keys)
+presets.json              # Named parameter sets per TOPP workflow
+content/                  # One .py per Streamlit page
+src/
+  common/common.py        # page_setup(), load_params(), save_params(), show_fig(), show_table(), sidebar
+  common/captcha_.py      # Captcha + GDPR consent gate (online mode only)
+  common/admin.py         # Admin-password gate for "save workspace as demo"
+  Workflow.py             # Example WorkflowManager subclass
+  workflow/               # The TOPP Workflow Framework (see below)
+  python-tools/           # Custom Python analysis scripts with DEFAULTS lists
+  view.py, fileupload.py  # pyOpenMS plotting + mzML upload for the simple pages
+utils/                    # Streamlit-free helpers (FASTA, digest) used by content/digest.py
+docs/                     # Markdown rendered in-app by content/documentation.py
+k8s/                      # Kustomize base + worker-size components + prod overlay
+k8s/storage/              # SEPARATE root: NFS-Ganesha serving the RWX workspace volume
+docker/entrypoint.sh      # THE container entrypoint (redis + rq workers + streamlit [+ nginx])
+```
+
+### Runtime model: workspaces
+
+Every session gets a **workspace directory** holding that user's files and parameters. `page_setup()` resolves it and guarantees `<workspace>/mzML-files/` exists.
+
+- **Local** (`online_deployment: false`): workspace is a named dir (default `default`) under `../workspaces-<repository-name>`; the sidebar offers a create/switch/delete UI.
+- **Online** (`online_deployment: true`): a fresh UUID workspace per session, exposed as the `?workspace=` query param so URLs are shareable. Root comes from `$WORKSPACES_DIR` (default `/workspaces-streamlit-template`).
+
+`st.session_state.location` is `"local"` or `"online"` derived **solely from `online_deployment` in settings.json** (`src/common/common.py:466`). Workspace names are validated against path traversal by `is_safe_workspace_name()`. `clean-up-workspaces.py` deletes workspaces older than 7 days (k8s CronJob at 03:00; skips dot-dirs like `.demos/`).
+
+### Local vs online differences
+
+| | local | online |
+|---|---|---|
+| Workflow execution | `multiprocessing.Process` | Redis/RQ queue |
+| Captcha + GDPR consent | skipped (`controllo` forced true) | enforced |
+| mzML upload | many files at once, or reference a local folder | one file at a time |
+| Save-as-demo | hidden | shown if admin password set |
+| Max threads | `max_threads.local` (4), user-overridable | `max_threads.online` (2) |
+
+## Core Patterns
+
+### Simple pages
+
+```python
+from src.common.common import page_setup, save_params
+params = page_setup()
+st.number_input("X", value=params["example-x-dimension"], key="example-x-dimension")
+save_params(params)
+```
+
+`page_setup()` must be the first call — it loads settings, resolves the workspace, renders the sidebar and applies the captcha gate. Widget `key`s must exist verbatim in `default-parameters.json`; `save_params()` copies matching session-state values into `<workspace>/params.json`. Display-only pages skip `save_params()`. (`content/digest.py` is a non-conforming outlier that never calls `page_setup()` at all.)
+
+Register pages in `app.py` under a named section:
+
+```python
+pages = {"Section Name": [st.Page(Path("content", "my_page.py"), title="My Page", icon="🔬")]}
+```
+
+### TOPP workflows (WorkflowManager)
+
+Subclass `WorkflowManager` (see `src/Workflow.py`) and implement four methods:
+
+- `upload()` — `self.ui.upload_widget()`; files land in `<workflow_dir>/input-files/<key>/`
+- `configure()` — `self.ui.input_TOPP()`, `self.ui.input_python()`, `self.ui.input_widget()`
+- `execution()` — `self.file_manager.get_files()` to derive paths, then `self.executor.run_topp()` / `run_python()`
+- `results()` — display outputs
+
+Each workflow gets four thin content pages calling `wf.show_file_upload_section()` / `show_parameter_section()` / `show_execution_section()` / `show_results_section()`. An optional fifth page calls `wf.show_results_download_section(exclude=[...])`, which offers every file under `<workflow_dir>/results/` singly or as a ZIP (pass `exclude` for caches that are not results). Decorate `configure()` and `results()` with `@st.fragment`.
+
+**Multi-run workflows (opt-in, FLASHApp-style).** Set the class attribute `multi_run = True` on the subclass and every start becomes its own named result set instead of overwriting `results/`. Layout: `<workflow_dir>/runs/<run_id>/{run.json, params.json, results/, logs/}`, managed by the Streamlit-free `RunManager` (`src/workflow/RunManager.py`; widgets in `src/workflow/run_widgets.py`). What changes for the subclass:
+
+- **Read and write results through `self.results_dir`**, never `Path(self.workflow_dir, "results")`. `FileManager.get_files(set_results_dir=...)` already targets the current run. In `execution()` it is the new run; in `results()` it is the run picked on the page.
+- The Run page gets a run-name field; `show_results_section()` draws a run picker before calling `results()`; `show_results_download_section()` lists all runs (show, rename, ZIP download of results + params + logs, delete) above the per-file download of the picked run.
+- The picked run is shared by every page of the workflow (`run_widgets.get_selected_run`, default: newest finished run). Pages without a workflow object call `run_widgets.select_run(RunManager(workflow_dir))`; `wf.select_runs()` returns several ids for side-by-side comparisons.
+- **Read a run's parameters from `self.runs.params(run_id)`**, not the workflow's `params.json` — that file holds the settings for the *next* run.
+- Queue mode passes `run_id` to `tasks.execute_workflow`; the worker writes into that run and marks it finished/failed. Stopping a run marks it cancelled.
+- Switching an existing workflow to multi-run moves a non-empty `results/` into a run named "Earlier run" on first load (`RunManager.adopt_legacy_results`), so demo workspaces and users' earlier results stay visible.
+
+**Experimental design**: `self.ui.experimental_design("mzML-files")` in `configure()` shows a condition / biological replicate / fraction table for the selected files (pass `reactive=True` to that `select_input_file` so the table follows the selection), with design.tsv and SDRF import. It saves `<workflow_dir>/experimental-design.tsv` in the OpenMS two-table format, which a TOPP tool takes as `-design`; `src/workflow/ExperimentalDesign.py` (Streamlit-free, so usable in `execution()`) reads, writes and checks it.
+
+**`execution()` must be annotated `-> bool` and `return True` only when every step succeeded.** Both callers — `workflow_process()` locally and `tasks.execute_workflow()` in queue mode — log the `WORKFLOW FINISHED` marker only for a truthy return, and a missing marker is classified as an error. `run_topp()` and `run_python()` both return `False` on failure; gate every call on it, or a run whose third tool died is still reported as a success. The shipped example (`src/Workflow.py`) does exactly this — copy its structure *and* its return type.
+
+**Upgrading a fork:** queue mode previously wrote the marker unconditionally and returned a result dict from its exception handler, so *every* queued job was recorded successful and RQ's `FailedJobRegistry` was structurally empty. It now honours the return value and re-raises. A subclass still declared `execution() -> None` keeps working — `None` is accepted as success with a deprecation warning in the workflow log — but it reports nothing when a tool fails, so fix the signature when you rebase.
+
+The workflow directory is `<workspace>/<workflow-name-lowercased-hyphenated>/`, containing `params.json`, `ini/`, `logs/`, `pids/`.
+
+- **`file_manager.get_files(files, set_file_type=, set_results_dir=, collect=True)`** derives output paths from input paths. `collect=True` folds a list into a single nested list for tools that accept many inputs at once. It **raises `ValueError` on an empty list**, so guard the user's selection first. `set_results_dir="auto"` generates a random 4-char dir — fine for intermediates, but use a named subdir for anything `results()` has to find.
+- **`executor.run_topp(tool, input_output={...})`** pairs the n-th input with the n-th output; every list in `input_output` must be length 1 or the same length, else `ValueError`. Length-1 entries are reused for every command. It parallelises across files up to `max_threads` and splits threads per command.
+- **Cancellation** is PID-file based: `run_command()` touches `pids/<pid>`; `stop_workflow()` SIGTERMs each PID (`executor.stop()` is a SIGKILL fallback used only when no stop function is wired in). Workflow status is "running" if `pids/` is non-empty (local) or taken from the RQ job (online).
+- **Logging**: `self.logger.log(msg, level)` writes to `logs/minimal.log` (level 0), `commands-and-run-times.log` (≤1), `all.log` (≤2). Terminal state is parsed from the markers `WORKFLOW FINISHED` / `WORKFLOW CANCELLED` by `_log_status.classify_log_outcome()` — cancellation wins over error, because a TOPP subprocess often dies noisily during teardown.
+
+### Queue mode (online)
+
+`start_workflow()` flushes params to disk, then dispatches to Redis/RQ if `online_deployment` is true and Redis is reachable, else to a local `multiprocessing.Process`. The container entrypoint starts `redis-server`, N × `rq worker openms-workflows`, and the Streamlit server(s) — all in one image.
+
+**`src/workflow/tasks.py` runs inside the RQ worker and must stay importable without Streamlit.** It rebuilds the workflow object with `object.__new__(WorkflowClass)` and hand-injects the members, deliberately bypassing `__init__` because that needs Streamlit. So **anything reachable from `execution()` must be session-state free** — the worker has no `st.session_state`. Worker and UI share state only through the workspace filesystem (`params.json`, `logs/`, `pids/`) and RQ job metadata. `REDIS_URL` defaults to `redis://localhost:6379/0`.
+
+**The worker refuses a job from a page that runs other code.** `submit_job()` stamps `job.meta["app_build"]` (`src/workflow/app_build.py`: `settings.json` version plus a hash of `src/**/*.py`), and `execute_workflow()` stops before anything runs with a `WorkerBuildMismatchError` when the worker's hash differs, telling the user to restart the workers. Web and worker pods are separate Deployments of one image; with a moving tag such as `latest` a release reaches only the pods that restart, and an old worker then runs the new page's parameters with its old TOPP tools ("Parameters passed to '<tool>' are invalid", exit code 6). A job without a stamp, or a side whose hash is empty, is let through.
+
+The off-switches are `online_deployment` and unsetting `REDIS_URL`. `docs/REDIS_QUEUE_IMPLEMENTATION_PLAN.md` is a pre-implementation design doc written in future tense — the work shipped, its line references are stale, and the `queue_settings.enabled` flag it describes is read nowhere. Read the code.
+
+### Parameters — two independent systems
+
+Do not confuse them. `default-parameters.json` belongs **only** to the simple-page system; `presets.json` belongs **only** to the workflow framework.
+
+| | Simple pages | TOPP workflows |
+|---|---|---|
+| Store | `<workspace>/params.json` | `<workspace>/<workflow-slug>/params.json` |
+| Defaults | `default-parameters.json` | widget defaults in code + generated `.ini` |
+| API | `page_setup()` → `params`, `save_params(params)` | `ParameterManager`, auto-saved on every widget render |
+| Keys | widget `key` == JSON key | prefixed, see below |
+
+Workflow keys carry prefixes built from the workflow slug (`ParameterManager.py:71`):
+
+- `param_prefix` = `"<slug>-param-"` — custom widgets
+- `topp_param_prefix` = `"<slug>-TOPP-"` — TOPP params, keyed `"<Instance>:1:<param:path>"`. The literal `:1:` segment separates instance from parameter path and is load-bearing throughout.
+
+TOPP defaults come from `ini/<Tool>.ini`, generated on demand via `<Tool> -write_ini` and never edited; `create_ini()` writes it again when the tool executable is newer than the file (workspaces outlive images), and `run_topp()` leaves out, with a warning in the log, any stored parameter the tool's .ini does not list. Values merge as **ini defaults < `_defaults` (from `custom_defaults=`) < user overrides**, and only values differing from the effective default are persisted. `-ini` is never passed on the command line — every effective parameter becomes an explicit CLI arg.
+
+**Reserved keys in a workflow's `params.json`** — never use as widget keys: `_defaults`, `_flag_params`, `max_threads`, or anything containing `.py:` (python-tool params) or `:1:` (TOPP params).
+
+`tool_instance_name` lets the same TOPP tool appear several times with independent parameters. **Pass the same string to both `input_TOPP()` and `run_topp()`**, or parameters get written under one key and read under another. The `.ini` and the executable keep the real tool name; params.json and session keys use the instance name.
+
+Boolean **flag** parameters (valueless CLI switches) are declared explicitly — `input_TOPP("Tool", flag_parameters=["force"])` — and `run_topp` emits a bare `-force` when truthy, omitting it entirely when falsy. (`ParameterManager.bool_param_paths_from_param_xml_ini` and friends are a vestigial earlier attempt that nothing reads.)
+
+For conditional UI (a widget that shows/hides others), pass `reactive=True` to `input_widget`, `select_input_file`, or `input_TOPP` so the change reruns the parent `configure()` instead of only its isolated fragment. Read the changed value from `st.session_state` (not `self.params`, which is stale within that rerun) using the prefixes above.
+
+### Python tools
+
+Scripts in `src/python-tools/` declare a `DEFAULTS` list; `ui.input_python("example")` imports the file and auto-generates widgets from it. Params are passed to the script as a JSON file argv.
+
+```python
+DEFAULTS = [
+    {"key": "in", "value": [], "hide": True},
+    {"key": "my-param", "value": 5, "name": "My Parameter", "help": "Description",
+     "min": 1, "max": 100, "step_size": 1, "widget_type": "slider", "advanced": False},
+]
+```
+
+### Presets
+
+`presets.json` maps a workflow name (lowercase, hyphenated) to named parameter sets, surfaced by `ui.preset_buttons()`. Users can also save their own presets (`ui.user_presets()`, stored in `<workflow_dir>/user-presets.json` with the last applied preset); a user preset is a full snapshot that leaves out input file selections and `max_threads`, and its name may not shadow a built-in one:
+
+```json
+{"topp-workflow": {"High Sensitivity": {
+    "_description": "Tooltip text",
+    "FeatureFinderMetabo": {"algorithm:common:noise_threshold_int": 500.0},
+    "_general": {"custom-key": value}
+}}}
+```
+
+### Input files and zero-copy references
+
+Simple pages keep mzML in `<workspace>/mzML-files/`; workflows keep uploads in `<workflow_dir>/input-files/<key>/`. In both, a file can be **referenced instead of copied**: absolute paths are appended to a sentinel file **`external_files.txt`** in that directory. Every consumer that lists the directory must filter this filename out (see `content/raw_data_viewer.py:17`, `src/workflow/StreamlitUI.py:284`).
+
+Two paths produce those references — the local-mode "Make a copy of files" checkbox (unchecked), and the online-mode mounted-data browser. The latter renders only when `local_data_dir` from settings.json is a **real mount point** (`os.path.ismount`), because the image pre-creates `/mounted-data` as a bind target; this is what makes read-only `-v host:/mounted-data:ro` mounts usable without copying into the workspace volume.
+
+Simple-page workflow outputs go to `<workspace>/mzML-workflow-results/<timestamp>/`.
+
+**Vendor formats.** `upload_widget(file_types=["mzML", "raw", "d"])` accepts Thermo `.raw` files and Bruker `.d` folders (local: picked through the folder field, since the Tk file dialog cannot select a folder; online: uploaded as a zip, unpacked by `vendor_files.extract_bruker_zip()`). `execution()` turns them into mzML with `self.executor.convert_to_mzml(paths)`, which passes mzML through, runs **FileConverter** on `.raw` (ThermoRawFileParser; needs `mono` on Linux, .NET Framework on Windows, and FileConverter in the Windows `TOPP_TOOLS`) and `src/python-tools/bruker_to_mzml.py` on `.d` (timsrust + pyOpenMS `PeakPickerHiRes`; timsTOF TDF only, BAF/TSF fail with a message pointing at msconvert). Results are cached in `<workflow_dir>/converted-mzML/` while newer than the input; it returns `None` on failure, so gate on it.
+
+**Import from a link** (`src/data_import/`). `file_upload_section()` appends a section that downloads files from a link into the folders of the page's `upload_widget()`s: each widget registers its key, file types, folder and example files in `ui.upload_targets`, and an imported file goes to the first widget whose types match it. Sources (`sources.py`): Zenodo, Figshare, OneDrive (personal folders through the public shares API; SharePoint single files via `download=1`), public S3 / Swift folder listings, and any single file (presigned links included). An uncompressed tar or zip whose server answers Range requests is listed in place (`remote.py`) and its members download as byte ranges; anything else archive-like is downloaded whole and unpacked with path, link and size checks (`job._unpack`). `job.run_import` runs as a `multiprocessing.Process` in both deployments and talks to the page only through `<workflow_dir>/link-import/` (`status.json` with a heartbeat, a `cancel` file, `request.json` for restarts), so any Streamlit replica can show or stop it and a restart resumes the `.part` files. Online, `net.make_session(guard=True)` refuses non-public addresses before every request and redirect and checks the connected peer again (DNS rebinding); the local app is unguarded. Off unless `settings.json` has `data_import.enabled`. Everything but `ui.py` is Streamlit-free.
+
+## Workspace sync (offline app ↔ online workspace)
+
+`src/sync/` lets the offline (Electron) app push a local workspace's inputs (the files a user uploads, nothing else) into an online workspace, run its workflows there and pull the results back, for files too large for the browser uploader (raw files, Bruker `.d` folders). Off unless `workspace_sync.enabled` is set in settings.json. The template ships it enabled but **`developer_only`**: `sync_enabled()` then shows the sidebar panel, page and Run-page choice only to a session that unlocked **developer mode** (⚙️ Settings → Developer password, `src/common/developer.py`, checked against `developer_mode.password_sha256` — only the hash is in settings.json; the env var `DEVELOPER_PASSWORD_SHA256` overrides it per deployment, `none` disables; no hash, no developer mode). The sync service runs either way. The `enabled` flag registers the **Workspace Sync** page (`content/workspace_sync.py` → `src/common/workspace_sync.py`) in `app.py` for both builds. Online it issues tokens; offline it lists every input item (a file or a whole `.d` folder) and every result file with its state on both sides, and pushes or pulls the selected ones in a background thread. Items are grouped per workflow (`Item.workflow`); per workflow the user ticks "Upload inputs" and "Download results", stored in `<workspace>/.sync-prefs.json`, and **Keep in sync** runs a loop (`_watch`, every 30 s while the app runs) that transfers whatever is pending in the ticked directions. **Cloud runs:** workflows listed in `workspace_sync.workflows` (`{"<wf dir>": "module:Class"}`) get "Run on cloud" (upload the workflow's inputs, then `POST /sync/runs/<wf>` with the local `params.json`), live status, the log tail and Stop. Input paths in the parameters are sent as `sync-workspace://<rel>` (`client.portable_params`) and pointed at the server's copies by `runs.resolve_params`, which refuses the run while any is missing. A run uploads only the input items its parameters name (`client.run_inputs`). The workflow's **Run page** offers the same as "Run on: This computer / Online workspace" (`WorkflowManager._run_online` → `workspace_sync.render_run_choice`) for a linked workspace and a listed workflow, with the expected upload size before starting. For a `multi_run` workflow class the server creates a run (named as on the desktop) and the job writes into it; `<wf>/runs/<id>/**` is pulled once its `run.json` no longer says running, so the desktop's Results page lists the run. `src/sync/runs.py` queues `tasks.execute_workflow` on the same RQ queue and `.job_id` file as the online Run button, so the online pages show the run too; the sync service therefore needs `REDIS_URL`. The page's menu entry is hidden by CSS in `app.py`; users open it from the **Workspace Sync** sidebar panel (`render_sync_sidebar()`, called by `render_sidebar`). Offline the panel shows pending counts, a live transfer and a one-click **Sync** (push everything new or changed, then pull everything new or updated); online it shows whether a desktop app is linked and the uploads arriving (`server.incoming()`). The sidebar never waits on the network: item states live in the module-level `_STATUS` store and are refreshed in a background thread once older than a minute (ten seconds while a cloud run is active). Both panels are `st.fragment(run_every=…)` and rerun only themselves, never the page. 
+
+- **Server** `python -m src.sync.server` (tornado, no Streamlit), routed at `/sync`: tus 1.0.0 uploads, Range downloads, sha256 manifests. It runs in a container of its own: in k8s the `sync` Deployment and Service (`k8s/base/sync-deployment.yaml`, no session affinity, any replica continues any upload), with `/sync` routes in `ingress.yaml` and as `routes/1` of the Traefik IngressRoute (overlays patch its host match and service name like `routes/0`); in docker-compose the `sync` service. A single container (`docker run`, Apptainer) has `docker/entrypoint.sh` start it on `$SYNC_PORT` (8502) itself; setting `SYNC_UPSTREAM=host:port` skips that and points the nginx load balancer's `/sync/` there. Disabled, it serves `/sync/health` only.
+- **Auth** is a sync token from the online panel "Link desktop app", stored hashed in `<root>/.sync-tokens/`. The workspace UUID is never a credential.
+- **Scope** (`src/sync/paths.py`, enforced on both sides): push `mzML-files/**`, `<wf>/input-files/<key>/**` (paths in `external_files.txt` are sent as real files); pull `<wf>/results/**`. Partial uploads live in `<root>/.sync-uploads/` on the shared volume, so any replica continues them; a PATCH holds a POSIX record lock on `<id>.lock` (cluster-wide over NFS 4.1, released by the kernel or the NFS lease when a pod dies, so it never needs breaking), a second writer gets 423 and the client retries after a HEAD.
+- Robustness: tus chunks (`chunk_mb`) each carry a sha256 the server verifies, and a chunk cut off mid-transfer is truncated away; downloads resume by Range from `.<name>.sync-part`; lost connections are retried with back-off until `give_up_after` passes without progress; every finished file is checked against its sha256. The background thread must not touch `st.session_state`.
+- Client state: `<workspace>/.sync.json` (link + open uploads) and `.sync-cache.json` (hash cache). `tests/test_workspace_sync.py` runs a real server against the client.
+
+## Visualization
+
+`src/view.py` plots via the pyopenms-viz **`ms_plotly`** backend on `MSExperiment.get_df()` DataFrames (`df.plot(backend="ms_plotly", kind="chromatogram"|"spectrum"|"peakmap")`), with a 3D peak map only under 2500 points. Use `show_fig()` / `show_table()` from `src/common/common.py` so downloads and the configured image format work consistently.
+
+**Light and dark theme.** `.streamlit/config.toml` defines `[theme.light]` and `[theme.dark]` (Streamlit ≥ 1.51) and no `theme.base`, so the app follows the OS color scheme and users switch in ⋮ → Settings. Setting `base` pins one theme and removes the choice. `show_fig()` passes every figure through `follow_app_theme()`, which puts it on Streamlit's Plotly template and drops the white background, black axes and black annotation text that pyopenms-viz and `plotly_white`/`simple_white` set; call it yourself for a figure that goes to `st.plotly_chart` directly. In custom HTML, never set a light `background-color` without also setting the text `color`, or the text turns white on it in the dark theme. Insight components and Streamlit components read the active theme from Streamlit's render args.
+
+Downstream apps also use **OpenMS-Insight** (`Table`, `LinePlot`, `Heatmap`, `VolcanoPlot`, `SequenceView`) for very large datasets with server-side pagination and cross-component linking — note it is **not** a dependency of this template, and does not become one. It belongs to the **generated app**, which declares `openms-insight>=0.2.0` in its own `requirements.txt`; `build-insight-dashboard` puts it there, syncs the app's venv and confirms the import before mapping anything. Insight is the first solution, not a preference: `role` is a fixed vocabulary (`table`, `mirror`, `peakmap`, `chromatogram`) and each entry maps to a component by lookup, so pyopenms-viz is reached only when the role is outside that list or the import failed — and the wireframe names which. The framework had neither the install step nor the vocabulary until a run built a whole dashboard on a machine where the package was absent and told its user the fallback was for continuity with their notebook.
+
+## Documentation and deployment
+
+- `docs/*.md` is **single-sourced**: `content/documentation.py` reads those files and renders them in-app. Editing a doc changes the page. `docs/toppframework.py` is executable doc content — its *code samples* stay current because they are pulled from live source via `getsource()`/`st.help()`, but its surrounding prose does not (see gotchas).
+- `test_gui.py::test_documentation` parametrizes over the exact selectbox labels in `documentation.py` — **renaming a doc chapter breaks CI** unless both are updated.
+- Four Dockerfiles: `Dockerfile` (full, builds OpenMS `release/3.5.0` + TOPP tools from source) and `Dockerfile_simple` (pyOpenMS via pip only), each with an `.arm` variant. All use `docker/entrypoint.sh`.
+- Kubernetes: `k8s/base` → `k8s/components/memory-tier-{low,high}` → `k8s/overlays/prod` (sets `namePrefix`, GHCR image, Traefik hosts, `REDIS_URL`), plus the separate `k8s/storage/` root. The `memory-tier-*` components are **pod sizing only** — a tier is how big a worker is, not which node it runs on, and `requests == limits` there is what makes the worker Guaranteed QoS. **Nothing in `k8s/` pins a pod to a node**: no `nodeSelector`, no `nodeName`, no `nodeAffinity`, no `openms.de/memory-tier` labels. The scheduler places pods, and `rq-worker` runs a fixed replica count spread over `kubernetes.io/hostname` with `maxSkew: 1`. CI validates with kubeconform, asserts those invariants statically (`.github/scripts/ci-assertions.sh`), and runs kind integration tests against both nginx and Traefik ingress; the kind jobs apply `k8s/overlays/ci/`, which is `prod` with the worker shrunk to fit a runner.
+- Env/secrets: `WORKSPACES_DIR`, `REDIS_URL`, `STREAMLIT_SERVER_COUNT` (>1 puts nginx in front of N Streamlit instances), and `st.secrets["admin"]["password"]` from `.streamlit/secrets.toml` (mounted at `/app/admin-secrets/secrets.toml` in k8s) gating save-as-demo.
+
+## Repo skills in `.claude/skills/`
+
+Twenty-five loadable skills live here, each as `<name>/SKILL.md` with YAML frontmatter, so they surface automatically.
+
+**Task playbooks** (originally flat `.md` files, converted): `create-page`, `create-workflow`, `add-presets`, `add-python-tool`, `add-visualization`, `configure-app-settings`, `configure-docker-compose-deployment`, `configure-k8s-deployment`.
+
+**Software factory** (one template feeds the apps): `new-app-from-spec` (generate an app from `app.yaml`), `configure-app-identity` (every place the slug and name live), `sync-from-template` (merge the template into an app, conflicts resolved by `sync.app_owned`), `upstream-to-template` (template-first rule), `configure-desktop-installers`, `release-app`, `upgrade-openms`, `upgrade-openms-insight`, `parity-check`, `triage-ci`.
+
+### App spec and template sync
+
+`app.yaml` (schema `utils/app_spec.schema.json`) says what an app is: identity, inputs, workflows as TOPP/python steps, result views by Insight role, deploy targets, and `sync.app_owned`, the files the app owns. `python -m utils.app_spec` validates it and checks it against `settings.json` (`app-name`, `online_deployment`), the prod overlay's `namePrefix` and the storage namespace; `tests/test_app_spec.py` runs that. In the template it describes the example app and is the starting point for a new one.
+
+`.github/workflows/template-sync.yml` runs weekly in every app (never in the template itself): it merges `template.branch` of `template.repository` from `app.yaml`, keeps the app's side of conflicts in app-owned files, and opens or updates one `template-sync` PR; a conflict in a template-owned file, or no common history, opens an issue instead. Set a `TEMPLATE_SYNC_TOKEN` secret (fine-grained PAT or GitHub App token with contents, pull-requests, issues and workflows write): the default `GITHUB_TOKEN` cannot push a merge that changes `.github/workflows/`, and PRs it opens do not trigger CI.
+
+**Review queue** (`docs/review-queue.md`): PRs are sorted by risk. Dependabot patch/minor PRs (`.github/workflows/auto-merge.yml`) and template-sync PRs without any conflict are set to auto-merge, but only where the default branch has required status checks; `.github/CODEOWNERS` marks the full-review paths. `.github/scripts/setup-review-queue.sh OWNER/REPO CHECK...` is the one-time admin setup (merge options + default-branch ruleset). `sync.auto_merge: false` in `app.yaml` opts an app out.
+
+**Notebook → webapp framework** — turns a Jupyter notebook into an app. `notebook-to-webapp` orchestrates; the five stage skills also work standalone against an existing app:
+
+| skill | stage |
+|---|---|
+| `capture-notebook-workflow` | classify cells, extract a Streamlit-free python tool, golden-value test |
+| `interview-parameters` | one batch review: demo shortcuts, then config parameters ranked by provenance (measurement is opt-in) |
+| `scaffold-workflow-app` | `WorkflowManager` subclass, four pages, registration, hides all 15 template pages and rewrites Documentation from the notebook, smoke run |
+| `build-insight-dashboard` | link graph → wireframe → panels, plus the style contract |
+| `verify-webapp-usability` | headless-browser gate; **AppTest cannot see Insight components** |
+
+Plus `connect-browser-control`, run from preflight: it connects the Claude browser
+extension and proves the attached browser can load a page this host serves **on
+loopback**, so design rounds put the app in that same window. **Attached is
+not theirs** — the extension answering proves a browser exists somewhere
+reachable, not that anyone is sitting at it, and only the marker separates the
+two. The marker's verdict is reach, never presence: `switch_browser` was measured
+and **excludes the browser you are already attached to**, so nothing available
+proves a human is there and the framework does not pretend otherwise. Where the
+browser runs is never a finding and never reaches the user; what does reach them
+is the one thing they can act on. **A run never settles for the gate's headless
+browser on its own judgement**: every road short of confirmed control ends in an
+ask — the click, the click and a restart, or a browser to install — and only an
+explicit no licenses going without. The ask stops the *question*, not the setup:
+the store page opens in the browser the run found, **by naming that executable**
+(`start`/`open`/`xdg-open` resolve the default, which sent one run's store page
+to Firefox), the rest of preflight runs while the user clicks, and then the run
+**watches** `list_connected_browsers` every fifteen seconds rather than waiting
+to be told — a device has been measured connecting before its user typed
+anything. Control is confirmed
+**once**, and it can go stale silently — a user closing their browser re-attaches
+the session elsewhere while `navigate` keeps returning success — so a page that
+comes back wrong is repaired by re-enumerating, never by re-probing.
+
+Two carry runnable tools: `interview-parameters/probe.py` (measures what each parameter does, and detects one parameter masking another) and `verify-webapp-usability/gate.py` (the browser gate). **Both are opt-in or internal.** `probe.py` no longer runs by default — it is O(n²) and only ever needed to justify *hiding* a parameter, so config parameters are ranked by provenance and an unmeasured one may be exposed but never hidden. `gate.py` runs on every results page but never appears in a user-facing turn.
+
+**Users enter through the Quickstart page**, not through a slash command: `content/quickstart.py` holds an entry prompt they copy into any agentic terminal. It names the orchestrator **by file path**, because a repo cloned mid-session puts its skills on disk but not in the running session's registry — do not shorten it to the skill name.
+
+**Two interaction shapes, not interchangeable.** An *interview* is one batch, arriving already decided — every row carries the recommendation the framework would act on, so the user's work is disagreeing rather than choosing from nothing (capture findings, config parameters). A *design round* puts one rendered thing **in the user's own browser** and offers up to three suggestions — one on **data**, one on **layout**, one on **behaviour**, each pointing at something visible — plus a free field and an exit, then re-renders. Rounds run on the Upload, Configure and Results pages; the first two are bounded to *template functionality* (widget arguments, section naming and order, presets), because the template chose those pages' shape. None opens before a **smoke run** has driven upload→configure→execute→results once with the notebook's own data. The gate runs before the final page round and feeds it, rephrased as suggestions.
+
+**Everything the user decides is asked, never drawn.** Suggestions and findings arrive as options they select, one at a time — a checklist printed into the transcript is a control the reader cannot operate, and a list too long for one screen asks whether the recommendation stands before it asks about any single row.
+
+**A user-facing turn is capped at 200 words and never contains the framework's own vocabulary** — cell classes, harvesting, probes, sweeps, gates, screenshots, `DEFAULTS`/`OUTPUTS`.
+
+**The skills never name the evaluation corpus.** Rules are earned by running three specific notebooks, so worked examples drift toward quoting them — at which point an agent handed one of those notebooks can read its expected answer out of the skill it is being measured against. Measured values are written as placeholders (`<n> of <total> spectra`, `df.head(<n>)`, `cell <k>`) and filled from the run at hand.
+
+Design and rationale: `docs/notebook-to-webapp-design.md`, `docs/adr/0001..0005`, glossary in `CONTEXT.md`. The user-facing walkthrough is `docs/notebook_to_webapp.md`, rendered in-app.
+
+## Conventions and gotchas
+
+- Pages in `content/`, logic in `src/`. Simple-page widget keys must match `default-parameters.json`. TOPP parameter paths are colon-separated (`algorithm:section:param`).
+- **`page_setup()` must run before `Workflow()`** — the constructor dereferences `st.session_state["workspace"]`, and the upload widgets need `location` / `previous_dir` / `local_dir`, all set by `page_setup()`.
+- **`input_TOPP()` and `input_python()` require `st.session_state["advanced"]`**, which only `parameter_section()` creates. Calling them from a page that does not go through `show_parameter_section()` raises `KeyError`.
+- **The workflow slug is load-bearing in three places at once**: the workflow directory, the `presets.json` top-level key, and every session-state prefix. Renaming a workflow silently orphans its presets *and* abandons existing user parameters.
+- Presets apply by writing `params.json` and *deleting* the matching session keys so widgets re-initialize. This misses widgets left at `widget_type="auto"` for numeric/selectbox/multiselect types (an auto-widget double-prefixes its session key), whose stale value then overwrites the preset — pass an explicit `widget_type` for any parameter you intend to drive from a preset.
+- Keep new `src/workflow/` logic importable with `streamlit` and `pyopenms` mocked at the `sys.modules` level — that is how most of `tests/` exercises it.
+- `docs/toppframework.py` is the most current prose on the framework but has drifted: it still names `src/TOPPWorkflow.py` and `content/6_TOPP-Workflow.py`, and its `input_python` example passes an `input_output=` argument that method does not accept.
+- **There is no `pyproject.toml`** despite the pip-compile header in `requirements.txt` — it was never committed, so the lockfile cannot be regenerated. Edit `requirements.txt` directly (the redis/rq/xlsxwriter lines at the bottom are already hand-maintained).
+- **The root `entrypoint.sh` is dead code** — superseded by `docker/entrypoint.sh` (all four Dockerfiles copy that one). Its `RUNTIME_DIR` default even names a different project.
+- `hooks/hook-analytics.py` is *not* a PyInstaller hook: it rewrites Streamlit's installed `static/index.html` in site-packages to inject analytics. Only run it inside a container image build.
+- `.streamlit/secrets.toml` is gitignored; only `.example` is tracked. `example-data/workspaces/` *is* tracked, so save-as-demo writes into version control.
+- `docs/build_app.md` is stale where it refers to `APP_NAME`/`REPOSITORY_NAME` in `src/common.py`; those now live in `settings.json` and the module is `src/common/common.py`.
