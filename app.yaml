@@ -124,3 +124,40 @@ sync:
   - src/metabolomicsresults.py
   - src/plotting/*
   - src/stats.py
+  - src/view.py
+  - src/fileupload.py
+  - CLAUDE.md
+  - .streamlit/config.toml
+  - Dockerfile
+  - Dockerfile_simple
+  - docker-compose.yml
+  - clean-up-workspaces.py
+  - .github/workflows/build-desktop-app.yaml
+  - .github/workflows/ci.yml
+  - .github/workflows/workflow-tests.yml
+  - test.py
+  - k8s/*
+  - .github/workflows/build-and-test.yml
+  - .github/scripts/ci-assertions.sh
+  - .github/kind-config.yaml
+  - src/Workflow.py
+  - src/simpleworkflow.py
+  - src/mzmlfileworkflow.py
+  - src/run_subprocess.py
+  - src/peptide_mz_calculator.py
+  - utils/digest.py
+  - utils/fasta.py
+  - test_gui.py
+  - docs/toppframework.py
+  - docs/user_guide.md
+  - docs/build_app.md
+  - docs/installation.md
+  - docs/win_exe_with_embed_py.md
+  - docs/win_exe_with_pyinstaller.md
+  - tests/test_simple_workflow.py
+  - tests/test_run_subprocess.py
+  - tests/test_seed_demos.py
+  - tests/test_storage_health.py
+  - tests/test_tasks.py
+  - tests/test_workspace_sync.py
+  - tests/test_workspace_selector.py

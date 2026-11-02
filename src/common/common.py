@@ -6,6 +6,7 @@ import json
 import time
 import psutil
 import shutil
+import logging
 
 import pandas as pd
 import streamlit as st
@@ -23,6 +24,7 @@ try:
 except ImportError:
     TK_AVAILABLE = False
 
+from src.common.developer import render_developer_toggle
 from src.common.captcha_ import captcha_control
 from src.common.admin import (
     is_admin_configured,
@@ -31,6 +33,8 @@ from src.common.admin import (
     save_workspace_as_demo,
 )
 
+logger = logging.getLogger(__name__)
+
 # Detect system platform
 OS_PLATFORM = sys.platform
 
@@ -38,6 +42,37 @@ OS_PLATFORM = sys.platform
 # mounts the app under a new path on every launch, so links into it would
 # dangle after a restart; it copies them instead.
 LINK_EXAMPLE_FILES = OS_PLATFORM == "linux" and "APPIMAGE" not in os.environ
+
+# Default legal/GDPR page links. These point to the centrally maintained
+# official OpenMS pages. Forks that self-host should override them via the
+# "legal_links" key in settings.json (an Impressum must name the actual
+# operator). The defaults live here too — not only in settings.json — so that
+# downstream apps built from an older settings.json without a "legal_links"
+# key still inherit working legal links by default.
+DEFAULT_LEGAL_LINKS = {
+    "impressum": "https://openms.de/impressum",
+    "privacy": "https://openms.de/privacy",
+    "terms": "https://openms.de/terms",
+}
+
+
+def get_legal_links() -> dict[str, str]:
+    """
+    Return the legal page URLs (Impressum, Privacy Policy, Terms of Use).
+
+    Values from the "legal_links" object in settings.json override the
+    built-in OpenMS defaults. Empty override values are ignored so a blank
+    entry can't erase a default.
+
+    Returns:
+        dict[str, str]: Mapping of "impressum", "privacy" and "terms" to URLs.
+    """
+    overrides = (
+        st.session_state.settings.get("legal_links", {})
+        if "settings" in st.session_state
+        else {}
+    )
+    return {**DEFAULT_LEGAL_LINKS, **{k: v for k, v in overrides.items() if v}}
 
 
 def is_safe_workspace_name(name: str) -> bool:
@@ -210,8 +245,31 @@ def copy_demo_workspace(demo_name: str, target_path: Path) -> bool:
         return False
 
 
+def _keep_fragment_non_empty():
+    """Give an auto-rerunning fragment one element even when it shows nothing.
+
+    Precaution against a white page reported in Firefox after a page switch,
+    with the frontend throwing "Bad 'setIn' index". The suspected cause is a
+    `run_every` fragment that renders no element on a run, so a later delta
+    targets a block the browser no longer has. An empty placeholder keeps the
+    fragment's block in the element tree on every run.
+    """
+    st.empty()
+
+
 @st.fragment(run_every=5)
 def monitor_hardware():
+    """
+    Display CPU and RAM of the machine running this Streamlit process.
+
+    Gated by the caller on where the workflows actually run, not on
+    `online_deployment`: in Kubernetes psutil here reports a Streamlit pod that
+    does no work, and an idle 2Gi container shown while a 64Gi worker saturates
+    is worse than showing nothing. In the single-container images - the full
+    one under docker-compose, and `Dockerfile_simple`, which has no queue at
+    all - this process and the workflows share a machine and these are the only
+    numbers that expander has. See `health.queue_workers_are_remote()`.
+    """
     cpu_progress = psutil.cpu_percent(interval=None) / 100
     ram_progress = 1 - psutil.virtual_memory().available / psutil.virtual_memory().total
 
@@ -227,6 +285,7 @@ def monitor_hardware():
 @st.fragment(run_every=5)
 def monitor_queue():
     """Display queue metrics in sidebar (online mode only)"""
+    _keep_fragment_non_empty()
     try:
         from src.workflow.health import get_queue_metrics
 
@@ -266,6 +325,107 @@ def monitor_queue():
 
     except Exception:
         pass  # Silently fail if queue not available
+
+
+@st.fragment(run_every=5)
+def monitor_storage():
+    """
+    Display shared storage status in sidebar.
+
+    Reads Redis and nothing else. The workspace volume is a shared NFS mount
+    online, and its failure mode is a hang rather than an error: a `stat` on a
+    `hard` mount that has wedged blocks in uninterruptible sleep and cannot be
+    killed, so a fragment re-running every 5 seconds would accumulate unkillable
+    threads - this indicator would become the very hang it exists to report.
+    The mount is touched by the rq-worker readiness probe instead, which
+    publishes a per node heartbeat whose Redis TTL is the liveness mechanism.
+
+    Renders nothing where no node publishes a heartbeat at all - local mode,
+    docker-compose, apptainer - because a red tick for a mechanism that is not
+    deployed is a false alarm pointing at the wrong layer.
+    """
+    _keep_fragment_non_empty()
+    try:
+        from src.workflow.health import get_storage_status
+
+        status = get_storage_status()
+        if not status:
+            return
+
+        state = status.get("state", "unknown")
+        nodes = status.get("nodes") or []
+        stale = status.get("stale_nodes") or []
+
+        st.markdown("---")
+        st.markdown("**Storage Status**")
+
+        if state == "connected":
+            st.markdown(":green[Connected]")
+            st.caption(
+                f"{len(nodes)} node{'' if len(nodes) == 1 else 's'} reporting a "
+                "healthy shared volume."
+            )
+        elif state == "degraded":
+            # The case per node heartbeats exist for. Collapsing them would
+            # show green here, because a healthy node is still reporting.
+            st.markdown(":orange[Degraded]")
+            st.caption(
+                f"{', '.join(stale)} stopped confirming the shared volume. "
+                "Workflows running there may be stalled; other nodes are fine."
+            )
+        elif state == "unreachable":
+            st.markdown(":red[Unreachable]")
+            st.caption(
+                "No node has confirmed the shared volume recently. Running "
+                "workflows may be stalled and new results may not appear."
+            )
+        else:
+            # Redis is down, which says nothing about the mount. Showing this as
+            # unreachable storage would send an operator to the wrong layer.
+            st.markdown(":gray[Unknown]")
+            st.caption("Cannot reach the queue, so storage status is unknown.")
+
+        st.caption(f"Last fetched at: {time.strftime('%H:%M:%S')}")
+
+    except Exception:
+        # Never break the sidebar over an indicator, but never swallow it in
+        # silence either: a broken indicator that renders nothing is
+        # indistinguishable from a deployment that has no shared storage.
+        logger.exception("Could not render the shared storage indicator")
+
+
+def render_resource_utilization():
+    """
+    Render the sidebar's "Resource Utilization" expander.
+
+    Extracted from `render_sidebar()` so the choice of panels is reachable
+    without standing up a whole session (tests/test_sidebar_monitors.py).
+
+    Which panels apply is a question about the deployment, and the three
+    answers do not line up with `online_deployment`:
+
+    - Kubernetes: the queue and the shared volume are what a user's job waits
+      on, and psutil here would describe a Streamlit pod that runs nothing.
+    - Full image under docker/docker-compose: one container runs Redis, the RQ
+      workers and Streamlit, so all three panels describe the same machine.
+    - `Dockerfile_simple`: `online_deployment` is baked true but there is no
+      Redis and no queue, so the psutil panel is the only content there is.
+      Gating it on `online_deployment` left the expander empty.
+    """
+    from src.workflow.health import get_queue_metrics, queue_workers_are_remote
+
+    with st.expander("📊 **Resource Utilization**"):
+        # `{}` means "no queue in this deployment" - the same distinction
+        # get_queue_metrics() already draws for the metrics themselves.
+        metrics = get_queue_metrics()
+        if metrics:
+            monitor_queue()
+            monitor_storage()
+        # Short-circuited on `available`: an unreachable queue is not evidence
+        # that the workers are elsewhere, and this saves the second round trip
+        # in exactly the case where Redis is slow to answer.
+        if not (metrics.get("available") and queue_workers_are_remote()):
+            monitor_hardware()
 
 
 def load_params(default: bool = False) -> dict[str, Any]:
@@ -432,6 +592,23 @@ def page_setup(page: str = "") -> dict[str, Any]:
                 width=1,
                 height=1,
             )
+        if (st.session_state.settings["analytics"]["matomo"]["enabled"]) and (
+            st.session_state.tracking_consent["matomo"] == True
+        ):
+            html(
+                """
+                <!DOCTYPE html>
+                <html lang="en">
+                    <head></head>
+                    <body><script>
+                    window.parent._mtm = window.parent._mtm || [];
+                    window.parent._mtm.push(['MTMSetConsentGiven']);
+                    </script></body>
+                </html>
+                """,
+                width=1,
+                height=1,
+            )
 
     # Determine the workspace for the current session
     if ("workspace" not in st.session_state) or (
@@ -454,6 +631,10 @@ def page_setup(page: str = "") -> dict[str, Any]:
         # Define the directory where all workspaces will be stored
         if st.session_state.location == "local":
             workspaces_dir = local_workspaces_dir(st.session_state.settings)
+        elif st.session_state.location == "online":
+            workspaces_dir = Path(
+                os.environ.get("WORKSPACES_DIR", "/workspaces-streamlit-template")
+            )
         else:
             workspaces_dir = ".."
 
@@ -519,7 +700,7 @@ def page_setup(page: str = "") -> dict[str, Any]:
     # Render the sidebar
     params = render_sidebar(page)
 
-    captcha_control()
+    captcha_control(privacy_policy_url=get_legal_links()["privacy"])
 
     # If run in hosted mode, show captcha as long as it has not been solved
     # if not "local" in sys.argv:
@@ -532,7 +713,7 @@ def page_setup(page: str = "") -> dict[str, Any]:
         "controllo" in params.keys() and params["controllo"] == False
     ):
         # Apply captcha by calling the captcha_control function
-        captcha_control()
+        captcha_control(privacy_policy_url=get_legal_links()["privacy"])
 
     return params
 
@@ -569,10 +750,17 @@ def render_sidebar(page: str = "") -> None:
                 with st.expander("🖥️ **Workspaces**"):
                     # Define callback function to change workspace
                     def change_workspace():
+                        # A page switch while a page is still loading can replay
+                        # this widget's value before its key is mapped again, so
+                        # the callback fires with no readable value. The user did
+                        # not pick another workspace then: leave everything as is.
+                        chosen = st.session_state.get("chosen-workspace")
+                        if chosen is None or chosen == st.session_state.workspace.name:
+                            return
                         for key in params.keys():
                             if key in st.session_state.keys():
                                 del st.session_state[key]
-                        st.query_params.workspace = st.session_state["chosen-workspace"]
+                        st.query_params.workspace = chosen
 
                     # Get all available workspaces as options
                     options = [
@@ -582,7 +770,7 @@ def render_sidebar(page: str = "") -> None:
                     st.selectbox(
                         "choose existing workspace",
                         options,
-                        index=options.index(str(st.session_state.workspace.stem)),
+                        index=options.index(st.session_state.workspace.name),
                         on_change=change_workspace,
                         key="chosen-workspace",
                     )
@@ -607,6 +795,11 @@ def render_sidebar(page: str = "") -> None:
                             st.session_state.workspace = Path(workspaces_dir, "default")
                             st.query_params.workspace = "default"
                             st.rerun()
+
+            # Imported only when enabled: most apps never use workspace sync.
+            if st.session_state.settings.get("workspace_sync", {}).get("enabled"):
+                from src.common.workspace_sync import render_sync_sidebar
+                render_sync_sidebar()
 
             # Demo workspace loader for online mode
             if st.session_state.location == "online":
@@ -645,73 +838,70 @@ def render_sidebar(page: str = "") -> None:
                                 time.sleep(1)
                                 st.rerun()
 
-                # Save as Demo section (online mode only)
-                with st.expander("💾 **Save as Demo**"):
-                    st.caption("Save current workspace as a demo for others to use")
+                # Save as Demo section (online mode only; hidden when admin
+                # password is not configured — the feature is then disabled).
+                if is_admin_configured():
+                    with st.expander("💾 **Save as Demo**"):
+                        st.caption("Save current workspace as a demo for others to use")
 
-                    demo_name_input = st.text_input(
-                        "Demo name",
-                        key="save-demo-name",
-                        placeholder="e.g., workshop-2024",
-                        help="Name for the demo workspace (no spaces or special characters)"
-                    )
-
-                    # Check if demo already exists
-                    demo_name_clean = demo_name_input.strip() if demo_name_input else ""
-                    existing_demo = demo_exists(demo_name_clean) if demo_name_clean else False
-
-                    if existing_demo:
-                        st.warning(f"Demo '{demo_name_clean}' already exists and will be overwritten.")
-                        confirm_overwrite = st.checkbox(
-                            "Confirm overwrite",
-                            key="confirm-demo-overwrite"
+                        demo_name_input = st.text_input(
+                            "Demo name",
+                            key="save-demo-name",
+                            placeholder="e.g., workshop-2024",
+                            help="Name for the demo workspace (no spaces or special characters)"
                         )
-                    else:
-                        confirm_overwrite = True  # No confirmation needed for new demos
 
-                    if st.button("Save as Demo", key="save-demo-btn", disabled=not demo_name_clean):
-                        if not is_admin_configured():
-                            st.error(
-                                "Admin not configured. Create `.streamlit/secrets.toml` with "
-                                "an `[admin]` section containing `password = \"your-password\"`"
+                        # Check if demo already exists
+                        demo_name_clean = demo_name_input.strip() if demo_name_input else ""
+                        existing_demo = demo_exists(demo_name_clean) if demo_name_clean else False
+
+                        if existing_demo:
+                            st.warning(f"Demo '{demo_name_clean}' already exists and will be overwritten.")
+                            confirm_overwrite = st.checkbox(
+                                "Confirm overwrite",
+                                key="confirm-demo-overwrite"
                             )
-                        elif existing_demo and not confirm_overwrite:
-                            st.error("Please confirm overwrite to continue.")
                         else:
-                            # Show password dialog
-                            st.session_state["show_admin_password_dialog"] = True
+                            confirm_overwrite = True  # No confirmation needed for new demos
 
-                    # Password dialog (shown after clicking Save as Demo)
-                    if st.session_state.get("show_admin_password_dialog", False):
-                        admin_password = st.text_input(
-                            "Admin password",
-                            type="password",
-                            key="admin-password-input",
-                            help="Enter the admin password to save this workspace as a demo"
-                        )
+                        if st.button("Save as Demo", key="save-demo-btn", disabled=not demo_name_clean):
+                            if existing_demo and not confirm_overwrite:
+                                st.error("Please confirm overwrite to continue.")
+                            else:
+                                # Show password dialog
+                                st.session_state["show_admin_password_dialog"] = True
 
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            if st.button("Confirm", key="confirm-save-demo"):
-                                if verify_admin_password(admin_password):
-                                    success, message = save_workspace_as_demo(
-                                        st.session_state.workspace,
-                                        demo_name_clean
-                                    )
-                                    if success:
-                                        st.success(message)
-                                        st.session_state["show_admin_password_dialog"] = False
-                                        time.sleep(1)
-                                        st.rerun()
+                        # Password dialog (shown after clicking Save as Demo)
+                        if st.session_state.get("show_admin_password_dialog", False):
+                            admin_password = st.text_input(
+                                "Admin password",
+                                type="password",
+                                key="admin-password-input",
+                                help="Enter the admin password to save this workspace as a demo"
+                            )
+
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                if st.button("Confirm", key="confirm-save-demo"):
+                                    if verify_admin_password(admin_password):
+                                        success, message = save_workspace_as_demo(
+                                            st.session_state.workspace,
+                                            demo_name_clean
+                                        )
+                                        if success:
+                                            st.success(message)
+                                            st.session_state["show_admin_password_dialog"] = False
+                                            time.sleep(1)
+                                            st.rerun()
+                                        else:
+                                            st.error(message)
                                     else:
-                                        st.error(message)
-                                else:
-                                    st.error("Invalid admin password.")
+                                        st.error("Invalid admin password.")
 
-                        with col2:
-                            if st.button("Cancel", key="cancel-save-demo"):
-                                st.session_state["show_admin_password_dialog"] = False
-                                st.rerun()
+                            with col2:
+                                if st.button("Cancel", key="cancel-save-demo"):
+                                    st.session_state["show_admin_password_dialog"] = False
+                                    st.rerun()
 
         # All pages have settings, workflow indicator and logo
         with st.expander("⚙️ **Settings**"):
@@ -730,12 +920,9 @@ def render_sidebar(page: str = "") -> None:
                 )
             else:
                 st.session_state["spectrum_num_bins"] = 50
+            render_developer_toggle()
 
-        with st.expander("📊 **Resource Utilization**"):
-            monitor_hardware()
-            # Show queue metrics in online mode
-            if st.session_state.settings.get("online_deployment", False):
-                monitor_queue()
+        render_resource_utilization()
 
         # Display OpenMS WebApp Template Version from settings.json
         with st.container():
@@ -761,6 +948,19 @@ def render_sidebar(page: str = "") -> None:
                 f'<div class="version-box">{app_name}<br>Version: {version_info}</div>',
                 unsafe_allow_html=True,
             )
+
+        # Legal links (Impressum, Privacy Policy, Terms of Use), shown on every
+        # page. URLs are configurable via "legal_links" in settings.json.
+        links = get_legal_links()
+        st.markdown(
+            '<div style="text-align:center; font-size:0.8rem; '
+            'margin-top:0.5rem; color:#a4a5ad;">'
+            f'<a href="{links["impressum"]}" target="_blank" rel="noopener" style="white-space:nowrap">Impressum</a> &middot; '
+            f'<a href="{links["privacy"]}" target="_blank" rel="noopener" style="white-space:nowrap">Privacy Policy</a> &middot; '
+            f'<a href="{links["terms"]}" target="_blank" rel="noopener" style="white-space:nowrap">Terms of Use</a>'
+            "</div>",
+            unsafe_allow_html=True,
+        )
     return params
 
 

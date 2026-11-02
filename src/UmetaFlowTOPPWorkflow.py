@@ -1135,11 +1135,19 @@ class Workflow(WorkflowManager):
                 },
             )
 
-            # Filter consensus features which have missing values
-            self.executor.run_topp(
-                "FileFilter",
-                {"in": gnps_consensus, "out": gnps_consensus},
-                custom_params={"id:remove_unannotated_features": ""},
+            # Keep only consensus features with MS2 data; GNPSExport crashes
+            # (exit code -11) on features without any. The option is a
+            # valueless flag, which run_topp() emits only for flags declared
+            # through input_TOPP(), so the command is built here.
+            self.executor.run_command(
+                [
+                    "FileFilter",
+                    "-in",
+                    gnps_consensus[0],
+                    "-out",
+                    gnps_consensus[0],
+                    "-id:remove_unannotated_features",
+                ]
             )
 
             # Export to dataframe

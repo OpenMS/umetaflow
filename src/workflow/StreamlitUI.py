@@ -5,11 +5,13 @@ import shutil
 import subprocess
 from typing import Any, Union, List, Literal, Callable
 import json
+import math
 import os
 import sys
 import importlib.util
 import time
 from io import BytesIO
+import pandas as pd
 import zipfile
 from datetime import datetime
 
@@ -22,6 +24,73 @@ from src.common.common import (
     tk_directory_dialog,
     tk_file_dialog,
 )
+from src.workflow._log_status import classify_log_outcome
+from src.workflow.ExperimentalDesign import (
+    align_design,
+    check_design,
+    design_path,
+    load_design,
+    read_design,
+    save_design,
+    to_openms_design,
+)
+from src.workflow.vendor_files import extract_bruker_zip, has_type
+from src.data_import import ui as data_import_ui
+from src.workflow.ParameterManager import (
+    InvalidParameterFileError,
+    TransientParameterFileError,
+)
+
+
+def _matches_topp_parameter(pattern: str, key: bytes) -> bool:
+    """
+    Match an include/exclude pattern against a TOPP parameter key.
+
+    Key format: b"ToolName:1:section:subsection:param_name"
+
+    A pattern matches the end of the parameter path, bounded by ':' or the
+    start of the path ("tol" matches "FD:tol"). A pattern ending in ':' names
+    a whole section from the top of the path instead ("fd:" matches every
+    parameter under "fd:", but not "FD:" or "algorithm:fd:").
+    """
+    pattern = pattern.lstrip(":")  # Strip legacy leading colon
+    key_str = key.decode()
+
+    # Extract param path after "ToolName:1:"
+    parts = key_str.split(":")
+    param_path = ":".join(parts[2:]) if len(parts) > 2 else key_str
+
+    if pattern.endswith(":"):
+        return param_path.startswith(pattern)
+
+    # Check if pattern matches as a suffix, bounded by ':' or start
+    return param_path == pattern or param_path.endswith(":" + pattern)
+
+
+def _mounted_data_root() -> Union[Path, None]:
+    """Return the validated mount root from the ``local_data_dir`` setting.
+
+    The browser renders only when ``local_data_dir`` is an actual mount
+    point inside the container — i.e. the operator passed ``-v`` /
+    ``--bind`` / ``volumeMount`` to attach host data. Existence alone is
+    no longer sufficient because the image now pre-creates the path so
+    apptainer/singularity binds have a real attach target; without
+    ``os.path.ismount`` the browser would render an empty tree for every
+    user who didn't mount anything.
+    """
+    settings = st.session_state.get("settings") or {}
+    raw = (settings.get("local_data_dir") or "").strip()
+    if not raw:
+        return None
+    try:
+        p = Path(raw).expanduser().resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
+    if not p.is_dir():
+        return None
+    if not os.path.ismount(p):
+        return None
+    return p
 
 
 class StreamlitUI:
@@ -35,6 +104,9 @@ class StreamlitUI:
     # Methods for Streamlit UI components
     def __init__(self, workflow_dir, logger, executor, parameter_manager):
         self.workflow_dir = workflow_dir
+        # upload key -> name, file types, folder and example files of each
+        # upload_widget() on the page, for "Import from a link"
+        self.upload_targets = {}
         self.logger = logger
         self.executor = executor
         self.parameter_manager = parameter_manager
@@ -56,6 +128,9 @@ class StreamlitUI:
         Args:
             key (str): A unique identifier for the upload component.
             file_types (Union[str, List[str]]): Expected file type(s) for the uploaded files.
+                ``"d"`` accepts Bruker .d folders: from a local folder, or online as
+                a zip archive. Convert vendor files before use with
+                ``CommandExecutor.convert_to_mzml()``.
             name (str, optional): Display name for the upload component. Defaults to the key if not provided.
             fallback (Union[List, str], optional): Default files to use if no files are uploaded.
         """
@@ -75,10 +150,27 @@ class StreamlitUI:
         if not name:
             name = key.replace("-", " ")
 
+        # Convert file_types to a list if it's a string
+        if isinstance(file_types, str):
+            file_types = [file_types]
+
+        # Where "Import from a link" can put files, see file_upload_section()
+        self.upload_targets[key] = {
+            "name": name,
+            "file_types": list(file_types),
+            "dir": str(files_dir),
+            "fallback": [str(Path(f).resolve()) for f in ([fallback] if isinstance(fallback, str) else fallback or [])],
+        }
+
         c1, c2 = st.columns(2)
-        c1.markdown("**Upload file(s)**")
+
+        mount_root = _mounted_data_root() if st.session_state.location == "online" else None
 
         if st.session_state.location == "local":
+            # A local install reads files straight from disk, so the browser
+            # upload widget (which streams every byte through the browser) is
+            # not offered. Files are picked from disk and copied or referenced.
+            c1.markdown("**Add file(s) from your computer**")
             c2_text, c2_checkbox = c2.columns([1.5, 1], gap="large")
             c2_text.markdown("**OR add files from local folder**")
             use_copy = c2_checkbox.checkbox(
@@ -88,20 +180,20 @@ class StreamlitUI:
                 help="Create a copy of files in workspace.",
             )
         else:
+            c1.markdown("**Upload file(s)**")
             use_copy = True
 
-        # Convert file_types to a list if it's a string
-        if isinstance(file_types, str):
-            file_types = [file_types]
-
-        if use_copy:
+        if st.session_state.location != "local":
             with c1.form(f"{key}-upload", clear_on_submit=True):
-                # Streamlit file uploader accepts file types as a list or None
-                file_type_for_uploader = file_types if file_types else None
+                # Streamlit file uploader accepts file types as a list or None.
+                # A .d folder cannot be uploaded from a browser, only a zip of it.
+                file_type_for_uploader = (
+                    file_types + ["zip"] if "d" in file_types else file_types
+                ) if file_types else None
 
                 files = st.file_uploader(
                     f"{name}",
-                    accept_multiple_files=(st.session_state.location == "local"),
+                    accept_multiple_files=False,
                     type=file_type_for_uploader,
                     label_visibility="collapsed",
                 )
@@ -112,40 +204,49 @@ class StreamlitUI:
                         # in case of online mode a single file is returned -> put in list
                         if not isinstance(files, list):
                             files = [files]
+                        failed = False
                         for f in files:
+                            if "d" in file_types and f.name.lower().endswith(".zip"):
+                                try:
+                                    added = extract_bruker_zip(f, files_dir)
+                                except zipfile.BadZipFile:
+                                    added = []
+                                if not added:
+                                    st.error(f"**{f.name}** holds no Bruker .d folder.")
+                                    failed = True
                             # Check if file type is in the list of accepted file types
-                            if f.name not in [
+                            elif f.name not in [
                                 f.name for f in files_dir.iterdir()
-                            ] and any(f.name.endswith(ft) for ft in file_types):
+                            ] and has_type(f.name, file_types):
                                 with open(Path(files_dir, f.name), "wb") as fh:
                                     fh.write(f.getbuffer())
-                        st.success("Successfully added uploaded files!")
+                        if not failed:
+                            st.success("Successfully added uploaded files!")
                     else:
                         st.error("Nothing to add, please upload file.")
         else:
-            # Create a temporary file to store the path to the local directories
             external_files = Path(files_dir, "external_files.txt")
-            # Check if the file exists, if not create it
-            if not external_files.exists():
-                external_files.touch()
             c1.write("\n")
             with c1.container(border=True):
                 dialog_button = st.button(
                     rf"$\textsf{{\Large 📁 Add }} \textsf{{ \Large \textbf{{{name}}} }}$",
                     type="primary",
                     use_container_width=True,
-                    key="local_browse_single",
+                    key=f"local_browse_single_{key}",
                     help="Browse for your local MS data files.",
                     disabled=not TK_AVAILABLE,
                 )
 
-                # Tk file dialog requires file types to be a list of tuples
-                if isinstance(file_types, str):
-                    tk_file_types = [(f"{file_types}", f"*.{file_types}")]
-                elif isinstance(file_types, list):
-                    tk_file_types = [(f"{ft}", f"*.{ft}") for ft in file_types]
-                else:
-                    raise ValueError("'file_types' must be either of type str or list")
+                # Tk file dialog requires file types to be a list of tuples.
+                # Both cases: Thermo writes .raw as well as .RAW.
+                tk_file_types = [
+                    (f"{ft}", f"*.{ft} *.{ft.upper()}") for ft in file_types
+                ]
+                if "d" in file_types:
+                    st.caption(
+                        "Bruker **.d** folders can't be picked here: add the "
+                        "folder that contains them on the right."
+                    )
 
                 if dialog_button:
                     local_files = tk_file_dialog(
@@ -156,8 +257,19 @@ class StreamlitUI:
                     if local_files:
                         my_bar = st.progress(0)
                         for i, f in enumerate(local_files):
-                            with open(external_files, "a") as f_handle:
-                                f_handle.write(f"{f}\n")
+                            my_bar.progress((i + 1) / len(local_files))
+                            if use_copy:
+                                if os.path.isdir(f):
+                                    shutil.copytree(
+                                        f,
+                                        Path(files_dir, Path(f).name),
+                                        dirs_exist_ok=True,
+                                    )
+                                else:
+                                    shutil.copy(f, Path(files_dir, Path(f).name))
+                            else:
+                                with open(external_files, "a") as f_handle:
+                                    f_handle.write(f"{f}\n")
                         my_bar.empty()
                         st.success("Successfully added files!")
 
@@ -207,9 +319,7 @@ class StreamlitUI:
                     for ft in file_types:
                         # Search for both files and directories with the specified extension
                         for path in local_dir.iterdir():
-                            if path.is_file() and path.name.endswith(f".{ft}"):
-                                files.append(path)
-                            elif path.is_dir() and path.name.endswith(f".{ft}"):
+                            if has_type(path, [ft]):
                                 files.append(path)
 
                     if not files:
@@ -248,7 +358,19 @@ class StreamlitUI:
                     "This means that the original files will be used instead. "
                 )
 
-        if fallback and not any([f for f in Path(files_dir).iterdir() if f.name != "external_files.txt"]):
+        if mount_root is not None:
+            with c2:
+                self._mounted_drive_browser(key, name, file_types, files_dir, mount_root)
+
+        external_files_path = Path(files_dir, "external_files.txt")
+        has_real_files = any(
+            p.name != "external_files.txt" for p in files_dir.iterdir()
+        )
+        has_external_picks = external_files_path.exists() and any(
+            line.strip() and os.path.exists(line.strip())
+            for line in external_files_path.read_text().splitlines()
+        )
+        if fallback and not has_real_files and not has_external_picks:
             if isinstance(fallback, str):
                 fallback = [fallback]
             for f in fallback:
@@ -304,6 +426,179 @@ class StreamlitUI:
         elif not fallback:
             st.warning(f"No **{name}** files!")
 
+    def _resolve_browser_cwd(self, key: str, mount_root: Path) -> Path:
+        """Read cwd for this widget from session state, confine it to mount_root."""
+        sess_key = f"mounted_cwd_{key}"
+        raw = st.session_state.get(sess_key, str(mount_root))
+        try:
+            cwd = Path(raw).expanduser().resolve(strict=True)
+        except (OSError, RuntimeError):
+            cwd = mount_root
+        if cwd != mount_root and mount_root not in cwd.parents:
+            cwd = mount_root
+        st.session_state[sess_key] = str(cwd)
+        return cwd
+
+    def _mounted_drive_browser(
+        self,
+        key: str,
+        name: str,
+        file_types: List[str],
+        files_dir: Path,
+        mount_root: Path,
+    ) -> None:
+        """Render a tree browser for a mounted host directory.
+
+        Selected files are referenced in place via ``external_files.txt`` —
+        the same mechanism the offline tkinter flow uses.
+        """
+        external_files = Path(files_dir, "external_files.txt")
+        if not external_files.exists():
+            external_files.touch()
+
+        cwd = self._resolve_browser_cwd(key, mount_root)
+        sess_cwd_key = f"mounted_cwd_{key}"
+
+        st.markdown(
+            """
+            <style>
+            div[data-testid="stButton"] button[kind="tertiary"] {
+                padding-top: 0.15rem;
+                padding-bottom: 0.15rem;
+                min-height: 0;
+                line-height: 1.3;
+            }
+            </style>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        with st.container(border=True):
+            st.markdown(
+                f"**Add {name} files from mounted directory** "
+                f"`{mount_root}`"
+            )
+
+            # Breadcrumbs: compact tertiary buttons separated by »,
+            # with a right-aligned Parent button.
+            try:
+                rel = cwd.relative_to(mount_root)
+                segments = [mount_root.name] + list(rel.parts) if rel.parts else [mount_root.name]
+            except ValueError:
+                segments = [mount_root.name]
+            n = len(segments)
+            ratios: List[float] = []
+            for i in range(n):
+                ratios.append(max(len(segments[i]), 3))
+                if i < n - 1:
+                    ratios.append(1)
+            ratios.append(20)  # flexible spacer
+            ratios.append(6)   # parent button slot
+            crumb_cols = st.columns(ratios, vertical_alignment="center")
+            col_idx = 0
+            for i, seg in enumerate(segments):
+                target = mount_root.joinpath(*segments[1 : i + 1]) if i > 0 else mount_root
+                if crumb_cols[col_idx].button(
+                    seg,
+                    key=f"crumb_{key}_{i}",
+                    type="tertiary",
+                ):
+                    st.session_state[sess_cwd_key] = str(target)
+                    st.rerun(scope="fragment")
+                col_idx += 1
+                if i < n - 1:
+                    crumb_cols[col_idx].markdown(
+                        "<span style='color:#888'>»</span>",
+                        unsafe_allow_html=True,
+                    )
+                    col_idx += 1
+            # spacer column
+            col_idx += 1
+            if cwd != mount_root:
+                if crumb_cols[col_idx].button(
+                    "⬆ Parent",
+                    key=f"mounted_parent_{key}",
+                    type="tertiary",
+                ):
+                    st.session_state[sess_cwd_key] = str(cwd.parent)
+                    st.rerun(scope="fragment")
+
+            try:
+                entries = sorted(
+                    (p for p in cwd.iterdir() if not p.name.startswith(".")),
+                    key=lambda p: (not p.is_dir(), p.name.lower()),
+                )
+            except PermissionError:
+                st.error(f"Permission denied reading `{cwd}`.")
+                return
+
+            def _is_match(p: Path) -> bool:
+                return has_type(p, file_types)
+
+            subdirs = [p for p in entries if p.is_dir() and not _is_match(p)]
+            bundled = [p for p in entries if p.is_dir() and _is_match(p)]
+            files = [p for p in entries if p.is_file() and _is_match(p)]
+
+            for d in subdirs:
+                indent, body = st.columns([1, 60], vertical_alignment="center")
+                if body.button(
+                    f"📂 {d.name}/",
+                    key=f"mounted_dir_{key}_{d.name}",
+                    type="tertiary",
+                ):
+                    st.session_state[sess_cwd_key] = str(d)
+                    st.rerun(scope="fragment")
+
+            selectable = bundled + files
+            selected_paths: List[str] = []
+            for f in selectable:
+                cb_key = f"mounted_pick_{key}_{f}"
+                size_label = ""
+                if f.is_file():
+                    try:
+                        size_mb = f.stat().st_size / (1024 * 1024)
+                        size_label = f"  ·  {size_mb:.1f} MB"
+                    except OSError:
+                        pass
+                icon = "🗂️" if f.is_dir() else "📄"
+                if st.checkbox(
+                    f"{icon} {f.name}{size_label}",
+                    key=cb_key,
+                ):
+                    selected_paths.append(str(f))
+
+            if not subdirs and not selectable:
+                st.info(
+                    f"No subdirectories or files matching "
+                    f"**{', '.join('.' + ft for ft in file_types)}** here."
+                )
+
+            count = len(selected_paths)
+            if st.button(
+                f"➕ Add {count} selected {name} file(s)" if count else f"➕ Add selected {name} file(s)",
+                key=f"mounted_add_{key}",
+                type="primary",
+                use_container_width=True,
+                disabled=count == 0,
+            ):
+                existing = set(
+                    line.strip()
+                    for line in external_files.read_text().splitlines()
+                    if line.strip()
+                )
+                added = 0
+                with open(external_files, "a") as fh:
+                    for p in selected_paths:
+                        if p not in existing:
+                            fh.write(f"{p}\n")
+                            existing.add(p)
+                            added += 1
+                # Clear the checkboxes by removing their session keys.
+                for f in selectable:
+                    st.session_state.pop(f"mounted_pick_{key}_{f}", None)
+                st.success(f"Added {added} file(s) from `{cwd}`.")
+                st.rerun(scope="fragment")
+
     def select_input_file(
         self,
         key: str,
@@ -343,7 +638,9 @@ class StreamlitUI:
         if not path.exists():
             st.warning(f"No **{name}** files!")
             return
-        options = [str(f) for f in path.iterdir() if "external_files.txt" not in str(f)]
+        options = sorted(
+            str(f) for f in path.iterdir() if "external_files.txt" not in str(f)
+        )
 
         # Check if local files are available
         external_files = Path(
@@ -459,11 +756,28 @@ class StreamlitUI:
 
         key = f"{self.parameter_manager.param_prefix}{key}"
 
+        # Streamlit ignores a widget's initial-value argument (value=/default=/index=)
+        # once that key already exists in session state -- but on Streamlit < 1.50 the
+        # argument is still hashed into the widget's element id. Since this method feeds
+        # the persisted parameter straight back in as that argument, the id changed on
+        # every interaction, the following interaction arrived under the now-stale id and
+        # was silently dropped: selecting six mzML files kept only three. Passing the
+        # argument on the first render only is not enough either: the id still changes
+        # once, between that render and the next, and the next rerun of the enclosing
+        # fragment resets the widget to empty -- a selection restored from params.json
+        # was wiped (and saved as empty) by the first reactive rerun of configure().
+        # So the argument is never passed: the first render writes the value into
+        # session state, which then owns it, and the id never changes.
+        def seed(initial: Any) -> dict:
+            if key not in st.session_state:
+                st.session_state[key] = initial
+            return {}
+
         if widget_type == "text":
-            st.text_input(name, value=value, key=key, help=help, on_change=on_change)
+            st.text_input(name, key=key, help=help, on_change=on_change, **seed(value))
 
         elif widget_type == "textarea":
-            st.text_area(name, value=value, key=key, help=help, on_change=on_change)
+            st.text_area(name, key=key, help=help, on_change=on_change, **seed(value))
 
         elif widget_type == "number":
             number_type = float if isinstance(value, float) else int
@@ -477,27 +791,29 @@ class StreamlitUI:
                 name,
                 min_value=min_value,
                 max_value=max_value,
-                value=value,
                 step=step_size,
-                format=None,
+                # "%g" keeps every decimal the user types; Streamlit's float
+                # default "%0.2f" rounds to two.
+                format="%g" if number_type is float else None,
                 key=key,
                 help=help,
                 on_change=on_change,
+                **seed(value),
             )
 
         elif widget_type == "checkbox":
-            st.checkbox(name, value=value, key=key, help=help, on_change=on_change)
+            st.checkbox(name, key=key, help=help, on_change=on_change, **seed(value))
 
         elif widget_type == "selectbox":
             if options is not None:
                 st.selectbox(
                     name,
                     options=options,
-                    index=options.index(value) if value in options else 0,
                     key=key,
                     format_func=format_files,
                     help=help,
                     on_change=on_change,
+                    **seed(value if value in options else (options[0] if options else None)),
                 )
             else:
                 st.warning(f"Select widget '{name}' requires options parameter")
@@ -507,11 +823,13 @@ class StreamlitUI:
                 st.multiselect(
                     name,
                     options=options,
-                    default=value,
                     key=key,
                     format_func=format_files,
                     help=help,
                     on_change=on_change,
+                    # A saved value that is no longer an option (a deleted
+                    # file, a renamed choice) is dropped; Streamlit raises on it.
+                    **seed([v for v in (value or []) if v in options]),
                 )
             else:
                 st.warning(f"Select widget '{name}' requires options parameter")
@@ -528,12 +846,12 @@ class StreamlitUI:
                     name,
                     min_value=min_value,
                     max_value=max_value,
-                    value=value,
                     step=step_size,
                     key=key,
                     format=None,
                     help=help,
                     on_change=on_change,
+                    **seed(value),
                 )
             else:
                 st.warning(
@@ -541,12 +859,12 @@ class StreamlitUI:
                 )
 
         elif widget_type == "password":
-            st.text_input(name, value=value, type="password", key=key, help=help, on_change=on_change)
+            st.text_input(name, type="password", key=key, help=help, on_change=on_change, **seed(value))
 
         elif widget_type == "auto":
             # Auto-determine widget type based on value
             if isinstance(value, bool):
-                st.checkbox(name, value=value, key=key, help=help, on_change=on_change)
+                st.checkbox(name, key=key, help=help, on_change=on_change, **seed(value))
             elif isinstance(value, (int, float)):
                 self._input_widget_impl(
                     key,
@@ -607,17 +925,19 @@ class StreamlitUI:
 
         self.parameter_manager.save_parameters()
 
-    @st.fragment
     def input_TOPP(
         self,
         topp_tool_name: str,
         num_cols: int = 4,
         exclude_parameters: List[str] = [],
         include_parameters: List[str] = [],
+        flag_parameters: List[str] = [],
         display_tool_name: bool = True,
         display_subsections: bool = True,
         display_subsection_tabs: bool = False,
         custom_defaults: dict = {},
+        tool_instance_name: str = None,
+        reactive: bool = False,
     ) -> None:
         """
         Generates input widgets for TOPP tool parameters dynamically based on the tool's
@@ -627,58 +947,194 @@ class StreamlitUI:
         Args:
             topp_tool_name (str): The name of the TOPP tool for which to generate inputs.
             num_cols (int, optional): Number of columns to use for the layout. Defaults to 3.
-            exclude_parameters (List[str], optional): List of parameter names to exclude from the widget. Defaults to an empty list.
+            exclude_parameters (List[str], optional): List of parameter names to exclude from the widget. A name ending in ":" excludes that whole top-level section (e.g. "fd:"). Defaults to an empty list.
             include_parameters (List[str], optional): List of parameter names to include in the widget. Defaults to an empty list.
+            flag_parameters (List[str], optional): List of parameter names that should
+                be treated as no-value CLI flags during command construction.
             display_tool_name (bool, optional): Whether to display the TOPP tool name. Defaults to True.
             display_subsections (bool, optional): Whether to split parameters into subsections based on the prefix. Defaults to True.
             display_subsection_tabs (bool, optional): Whether to display main subsections in separate tabs (if more than one main section). Defaults to False.
             custom_defaults (dict, optional): Dictionary of custom defaults to use. Defaults to an empty dict.
+            tool_instance_name (str, optional): A unique instance name for this tool
+                invocation. Allows multiple instances of the same TOPP tool with
+                independent parameters (e.g., two IDFilter calls). If not provided,
+                defaults to topp_tool_name. The instance name is used for session
+                state keys and parameter storage, while topp_tool_name is used for
+                the actual tool executable and ini file creation.
+            reactive (bool, optional): If True, widget changes trigger the parent
+                section to re-render, enabling conditional UI based on this widget's
+                value. Use when downstream UI depends on a parameter value (e.g.,
+                TMT type driving channel count). Default is False.
         """
+        if reactive:
+            self._input_TOPP_impl(
+                topp_tool_name, num_cols, exclude_parameters, include_parameters,
+                flag_parameters, display_tool_name, display_subsections,
+                display_subsection_tabs, custom_defaults, tool_instance_name,
+            )
+        else:
+            self._input_TOPP_fragmented(
+                topp_tool_name, num_cols, exclude_parameters, include_parameters,
+                flag_parameters, display_tool_name, display_subsections,
+                display_subsection_tabs, custom_defaults, tool_instance_name,
+            )
+
+    @st.fragment
+    def _input_TOPP_fragmented(
+        self,
+        topp_tool_name: str,
+        num_cols: int = 4,
+        exclude_parameters: List[str] = [],
+        include_parameters: List[str] = [],
+        flag_parameters: List[str] = [],
+        display_tool_name: bool = True,
+        display_subsections: bool = True,
+        display_subsection_tabs: bool = False,
+        custom_defaults: dict = {},
+        tool_instance_name: str = None,
+    ) -> None:
+        self._input_TOPP_impl(
+            topp_tool_name, num_cols, exclude_parameters, include_parameters,
+            flag_parameters, display_tool_name, display_subsections,
+            display_subsection_tabs, custom_defaults, tool_instance_name,
+        )
+
+    def _read_params_for_update(self, tool_instance_name: str) -> dict:
+        """
+        Strict read of params.json for the read-modify-write-back sites below.
+
+        Both callers merge into what they read and write the result straight
+        back, so a tolerant empty dict from an unreadable file would be written
+        over everything stored - erasing `_defaults`, `_flag_params` and every
+        other tool's values while looking like a successful save.
+        read_parameters_strict() raises instead, and here that raise becomes a
+        halt: the write is skipped entirely, so the file on disk is preserved
+        for inspection and can still be repaired by hand, or reset from the
+        button rendered below.
+
+        Args:
+            tool_instance_name (str): Instance currently being rendered, used to
+                keep the reset button key unique across tool fragments.
+
+        Returns:
+            dict: Stored parameters, or an empty dict for an absent file.
+
+        Does not return if the file exists but cannot be read.
+        """
+        try:
+            return self.parameter_manager.read_parameters_strict()
+        except TransientParameterFileError as e:
+            # Ordered before InvalidParameterFileError, of which this is a
+            # subclass. The storage is not answering; the file itself is most
+            # likely intact, so deliberately no reset affordance here - a reset
+            # during a Ganesha restart is what would actually destroy it.
+            st.error(
+                f"**ERROR**: {e} Nothing was written, so no stored parameters "
+                "were lost. This usually clears by itself, reload the page in "
+                "a moment."
+            )
+            st.stop()
+            # st.stop() raises, so this is only reached when Streamlit is
+            # stubbed out; re-raise rather than fall through to the write.
+            raise
+        except InvalidParameterFileError as e:
+            st.error(
+                f"**ERROR**: {e} Nothing was written, so no stored parameters "
+                "were lost. Repair the file, or reset to defaults to continue."
+            )
+            if st.button(
+                "⚠️ Reset parameters to defaults",
+                help="Move the unreadable parameter file aside and start over from the default parameters.",
+                key=f"reset_unreadable_params_{tool_instance_name}",
+            ):
+                try:
+                    backup = self.parameter_manager.reset_to_default_parameters()
+                except OSError as reset_error:
+                    # Without this the button itself raises and the page stops
+                    # again on the next render, with no remaining way out.
+                    st.error(
+                        f"**ERROR**: Could not move "
+                        f"{self.parameter_manager.params_file} aside: "
+                        f"{reset_error}"
+                    )
+                else:
+                    self.parameter_manager.clear_parameter_session_state()
+                    st.toast(
+                        f"Parameters reset to defaults, previous file kept as {backup.name}"
+                        if backup is not None
+                        else "Parameters reset to defaults"
+                    )
+                    # Every tool section is affected, not just this fragment.
+                    st.rerun(scope="app")
+            st.stop()
+            # st.stop() raises, so this is only reached when Streamlit is
+            # stubbed out; re-raise rather than fall through to the write.
+            raise
+
+    def _input_TOPP_impl(
+        self,
+        topp_tool_name: str,
+        num_cols: int = 4,
+        exclude_parameters: List[str] = [],
+        include_parameters: List[str] = [],
+        flag_parameters: List[str] = [],
+        display_tool_name: bool = True,
+        display_subsections: bool = True,
+        display_subsection_tabs: bool = False,
+        custom_defaults: dict = {},
+        tool_instance_name: str = None,
+    ) -> None:
+        """Internal implementation of input_TOPP - contains all the widget logic."""
+        # Default instance name to the tool name when not provided
+        if tool_instance_name is None:
+            tool_instance_name = topp_tool_name
+
+        # Register instance-name → real-tool-name mapping in session state
+        if "_topp_tool_instance_map" not in st.session_state:
+            st.session_state["_topp_tool_instance_map"] = {}
+        st.session_state["_topp_tool_instance_map"][tool_instance_name] = topp_tool_name
+
+        # Persist flag_parameters to session_state and params.json so run_topp
+        # can skip appending a value for these boolean CLI flags.
+        if "_topp_flag_params" not in st.session_state:
+            st.session_state["_topp_flag_params"] = {}
+        st.session_state["_topp_flag_params"][tool_instance_name] = list(flag_parameters)
+        _fp = self._read_params_for_update(tool_instance_name)
+        if "_flag_params" not in _fp:
+            _fp["_flag_params"] = {}
+        _fp["_flag_params"][tool_instance_name] = list(flag_parameters)
+        # Atomic: a truncate-then-rewrite interrupted here leaves a torn
+        # params.json which every later strict read rejects, wedging this very
+        # method on each render.
+        self.parameter_manager.write_parameters(_fp)
 
         if not display_subsections:
             display_subsection_tabs = False
         if display_subsection_tabs:
             display_subsections = True
 
-        # write defaults ini files
+        # Create pristine ini file (never mutated with custom defaults)
         ini_file_path = Path(self.parameter_manager.ini_dir, f"{topp_tool_name}.ini")
-        ini_existed = ini_file_path.exists()
         if not self.parameter_manager.create_ini(topp_tool_name):
             st.error(f"TOPP tool **'{topp_tool_name}'** not found.")
             return
-        if not ini_existed:
-            # update custom defaults if necessary
-            if custom_defaults:
-                param = poms.Param()
-                poms.ParamXMLFile().load(str(ini_file_path), param)
-                for key, value in custom_defaults.items():
-                    encoded_key = f"{topp_tool_name}:1:{key}".encode()
-                    if encoded_key in param.keys():
-                        param.setValue(encoded_key, value)
-                poms.ParamXMLFile().store(str(ini_file_path), param)
+
+        # Seed custom defaults into params.json under _defaults key
+        if custom_defaults:
+            params = self._read_params_for_update(tool_instance_name)
+            if "_defaults" not in params:
+                params["_defaults"] = {}
+            params["_defaults"][tool_instance_name] = custom_defaults
+            self.parameter_manager.write_parameters(params)
+            # Refresh self.params so widget resolution sees _defaults - reuse
+            # what was just written instead of reading the file back, which
+            # could be torn by a concurrent writer.
+            self.params = params
 
         # read into Param object
         param = poms.Param()
         poms.ParamXMLFile().load(str(ini_file_path), param)
 
-        def _matches_parameter(pattern: str, key: bytes) -> bool:
-            """
-            Match pattern against TOPP parameter key using suffix matching.
-
-            Key format: b"ToolName:1:section:subsection:param_name"
-
-            Returns True if pattern matches the end of the param path,
-            bounded by ':' or start of path.
-            """
-            pattern = pattern.lstrip(":")  # Strip legacy leading colon
-            key_str = key.decode()
-
-            # Extract param path after "ToolName:1:"
-            parts = key_str.split(":")
-            param_path = ":".join(parts[2:]) if len(parts) > 2 else key_str
-
-            # Check if pattern matches as a suffix, bounded by ':' or start
-            return param_path == pattern or param_path.endswith(":" + pattern)
 
         # Always apply base exclusions (input/output files, standard excludes)
         excluded_keys = [
@@ -697,7 +1153,7 @@ class StreamlitUI:
             if not (
                 b"input file" in param.getTags(key)
                 or b"output file" in param.getTags(key)
-                or any([_matches_parameter(k, key) for k in excluded_keys])
+                or any([_matches_topp_parameter(k, key) for k in excluded_keys])
             )
         ]
 
@@ -705,7 +1161,7 @@ class StreamlitUI:
         if include_parameters:
             included_keys = {
                 key for key in valid_keys
-                if any([_matches_parameter(k, key) for k in include_parameters])
+                if any([_matches_topp_parameter(k, key) for k in include_parameters])
             }
         else:
             included_keys = set(valid_keys)  # All are included when no filter specified
@@ -732,18 +1188,18 @@ class StreamlitUI:
                 )
             params.append(p)
 
-        # for each parameter in params_decoded
-        # if a parameter with custom default value exists, use that value
-        # else check if the parameter is already in self.params, if yes take the value from self.params
+        # Build ini_params dict for three-layer merge
+        ini_params = {}
         for p in params:
             name = p["key"].decode().split(":1:")[1]
-            if topp_tool_name in self.params:
-                if name in self.params[topp_tool_name]:
-                    p["value"] = self.params[topp_tool_name][name]
-                elif name in custom_defaults:
-                    p["value"] = custom_defaults[name]
-            elif name in custom_defaults:
-                p["value"] = custom_defaults[name]
+            ini_params[name] = p["value"]
+
+        # Resolve effective values: ini < _defaults < user overrides
+        merged = self.parameter_manager.get_merged_params(tool_instance_name, ini_params=ini_params)
+        for p in params:
+            name = p["key"].decode().split(":1:")[1]
+            if name in merged:
+                p["value"] = merged[name]
             # Ensure list parameters stay as lists after loading from JSON
             # (JSON may store single-item lists as strings)
             if p["original_is_list"] and isinstance(p["value"], str):
@@ -777,7 +1233,7 @@ class StreamlitUI:
 
         # Display tool name if required
         if display_tool_name:
-            st.markdown(f"**{topp_tool_name}**")
+            st.markdown(f"**{tool_instance_name}**")
 
         tab_names = [k for k in param_sections.keys() if ":" not in k]
         tabs = None
@@ -805,8 +1261,11 @@ class StreamlitUI:
             cols = st.columns(num_cols)
             i = 0
             for p in params:
-                # get key and name
-                key = f"{self.parameter_manager.topp_param_prefix}{p['key'].decode()}"
+                # get key and name – use tool_instance_name in session state key
+                key_str = p['key'].decode()
+                if tool_instance_name != topp_tool_name:
+                    key_str = key_str.replace(f"{topp_tool_name}:1:", f"{tool_instance_name}:1:", 1)
+                key = f"{self.parameter_manager.topp_param_prefix}{key_str}"
                 name = p["name"]
                 try:
                     # sometimes strings with newline, handle as list
@@ -850,10 +1309,21 @@ class StreamlitUI:
 
                     # floats
                     elif isinstance(p["value"], float):
+                        value = float(p["value"])
+                        # Streamlit's default "%0.2f" rounds what the user
+                        # types to two decimals, which makes tolerances such as
+                        # 0.015 Da impossible to enter. "%g" shows the value as
+                        # typed, and small defaults step in their own decade.
+                        step = (
+                            10.0 ** math.floor(math.log10(abs(value)))
+                            if 0 < abs(value) < 1
+                            else 1.0
+                        )
                         cols[i].number_input(
                             name,
-                            value=float(p["value"]),
-                            step=1.0,
+                            value=value,
+                            step=step,
+                            format="%g",
                             help=p["description"],
                             key=key,
                         )
@@ -1012,6 +1482,94 @@ class StreamlitUI:
                     cols = st.columns(num_cols)
         self.parameter_manager.save_parameters()
 
+    def experimental_design(self, key: str, name: str = "Experimental design") -> None:
+        """
+        Table assigning each selected input file a condition, biological replicate and fraction.
+
+        Edits are saved to ``<workflow_dir>/experimental-design.tsv`` in the
+        OpenMS design format, so ``execution()`` can pass that file to a TOPP
+        tool's ``-design`` or read it with ``ExperimentalDesign.load_design()``.
+        A design.tsv (one- or two-table) or SDRF file can be imported, and
+        spreadsheet cells can be pasted into the table. Inconsistencies such as
+        missing fractions are shown as notices, not errors.
+
+        Args:
+            key (str): The input file key whose selection the design covers
+                (the key passed to ``select_input_file``). Pass ``reactive=True``
+                to that ``select_input_file`` so the table follows the selection.
+            name (str, optional): The heading shown above the table.
+        """
+        files = st.session_state.get(
+            f"{self.parameter_manager.param_prefix}{key}", self.params.get(key, [])
+        )
+        if isinstance(files, str):
+            files = [files]
+        st.markdown(f"**{name}**")
+        if not files:
+            st.info("Select input files to define the experimental design.")
+            return
+
+        # Widget state keys stay outside param_prefix: save_parameters() writes
+        # every session key with that prefix to params.json.
+        version_key = f"_design-{Path(self.workflow_dir).name}-{key}"
+        st.session_state.setdefault(version_key, 0)
+        stored = load_design(self.workflow_dir, files)
+
+        uploaded = st.file_uploader(
+            "Import design.tsv or SDRF",
+            type=["tsv", "txt", "sdrf"],
+            key=f"{version_key}-import",
+            help="An OpenMS experimental design (one- or two-table) or an SDRF file. "
+            "Files are matched by name; files it does not list keep their current row.",
+        )
+        applied_key = f"{version_key}-applied"
+        if uploaded is not None and st.session_state.get(applied_key) != uploaded.file_id:
+            st.session_state[applied_key] = uploaded.file_id
+            try:
+                imported = read_design(uploaded.getvalue())
+            except (ValueError, KeyError, pd.errors.ParserError) as e:
+                st.error(f"Could not read {uploaded.name}: {e}")
+            else:
+                listed = set(imported["file"])
+                kept = stored[~stored["file"].isin(listed)]
+                stored = align_design(pd.concat([imported, kept]), files)
+                matched = len(listed & set(stored["file"]))
+                save_design(self.workflow_dir, stored, files)
+                st.session_state[version_key] += 1
+                st.toast(f"Imported the design of {matched} of {len(files)} file(s)")
+
+        edited = st.data_editor(
+            stored,
+            key=f"{version_key}-{st.session_state[version_key]}",
+            hide_index=True,
+            num_rows="fixed",
+            disabled=["file"],
+            column_config={
+                "file": st.column_config.TextColumn("File"),
+                "condition": st.column_config.TextColumn(
+                    "Condition", help="The group this file is compared as, e.g. control or treated."
+                ),
+                "replicate": st.column_config.NumberColumn(
+                    "Replicate", help="Biological replicate within the condition.", min_value=1, step=1
+                ),
+                "fraction": st.column_config.NumberColumn(
+                    "Fraction", help="Fraction number; 1 for unfractionated samples.", min_value=1, step=1
+                ),
+            },
+        )
+        path = design_path(self.workflow_dir)
+        if not path.is_file() or path.read_text(encoding="utf-8") != to_openms_design(edited, files):
+            save_design(self.workflow_dir, edited, files)
+
+        for notice in check_design(edited):
+            st.info(notice, icon="ℹ️")
+        st.download_button(
+            "Download design.tsv",
+            to_openms_design(edited, files),
+            file_name="design.tsv",
+            mime="text/tab-separated-values",
+        )
+
     def zip_and_download_files(self, directory: str):
         """
         Creates a zip archive of all files within a specified directory,
@@ -1086,22 +1644,110 @@ class StreamlitUI:
             col_idx = i % num_cols
             description = self.parameter_manager.get_preset_description(preset_name)
             with cols[col_idx]:
-                if st.button(
+                # Applied in a callback, before the rerun starts, rather than with
+                # st.rerun() from the button branch: that interrupts the script before
+                # configure() renders its widgets, and Streamlit drops the state of
+                # every widget a run does not reach. Their keys survive, so the
+                # widgets re-render from an empty value, e.g. the mzML file selection
+                # is lost and the next start fails with no input files.
+                st.button(
                     preset_name,
                     key=f"preset_{preset_name}",
                     help=description if description else None,
                     use_container_width=True,
-                ):
-                    if self.parameter_manager.apply_preset(preset_name):
-                        st.toast(f"Applied preset: {preset_name}")
-                        st.rerun()
-                    else:
-                        st.error(f"Failed to apply preset: {preset_name}")
+                    on_click=self._apply_preset_callback,
+                    args=(preset_name,),
+                )
             # Start new row if needed
             if col_idx == num_cols - 1 and i < len(preset_names) - 1:
                 cols = st.columns(num_cols)
 
+    def _apply_preset_callback(self, preset_name: str) -> None:
+        if self.parameter_manager.apply_preset(preset_name):
+            st.toast(f"Applied preset: {preset_name}")
+        else:
+            st.toast(f"Failed to apply preset: {preset_name}", icon="⚠️")
+
+    def user_presets(self, num_cols: int = 4) -> None:
+        """
+        Renders the presets the user saved, a form to save the current settings as
+        a new one or delete one, and which preset the settings come from.
+
+        Saved presets live in the workflow directory (user-presets.json), so they
+        stay with the workspace. Applying one restores every saved setting.
+        """
+        pm = self.parameter_manager
+        names = pm.get_user_preset_names()
+        if not pm.get_preset_names():
+            st.markdown("---")
+        st.markdown("**Your Presets**")
+        if names:
+            cols = st.columns(num_cols)
+            for i, name in enumerate(names):
+                col_idx = i % num_cols
+                description = pm.get_preset_description(name)
+                with cols[col_idx]:
+                    st.button(
+                        name,
+                        key=f"user_preset_{name}",
+                        help=description if description else None,
+                        use_container_width=True,
+                        on_click=self._apply_preset_callback,
+                        args=(name,),
+                    )
+                if col_idx == num_cols - 1 and i < len(names) - 1:
+                    cols = st.columns(num_cols)
+        else:
+            st.caption("Save the current settings to reuse them in a later run.")
+
+        with st.popover("💾 Save or delete a preset"):
+            st.text_input("Preset name", key="user_preset_name")
+            st.text_input("Description (optional)", key="user_preset_description")
+            st.button(
+                "Save current settings",
+                key="user_preset_save",
+                on_click=self._save_user_preset_callback,
+            )
+            if names:
+                st.selectbox("Saved preset", names, key="user_preset_delete_choice")
+                st.button(
+                    "Delete preset",
+                    key="user_preset_delete",
+                    on_click=self._delete_user_preset_callback,
+                )
+
+        applied, changed = pm.applied_preset_status()
+        if applied and changed:
+            st.caption(
+                f"✏️ Settings changed since you applied **{applied}**. "
+                "Save them as a preset to keep them."
+            )
+        elif applied:
+            st.caption(f"✅ Current settings: **{applied}**")
+
+    def _save_user_preset_callback(self) -> None:
+        name = st.session_state.get("user_preset_name", "").strip()
+        description = st.session_state.get("user_preset_description", "").strip()
+        if not name:
+            st.toast("Enter a name for the preset", icon="⚠️")
+        elif name in self.parameter_manager.get_preset_names():
+            st.toast(f"'{name}' is a built-in preset, choose another name", icon="⚠️")
+        elif self.parameter_manager.save_user_preset(name, description):
+            st.session_state["user_preset_name"] = ""
+            st.session_state["user_preset_description"] = ""
+            st.toast(f"Saved preset: {name}")
+        else:
+            st.toast(f"Could not save preset: {name}", icon="⚠️")
+
+    def _delete_user_preset_callback(self) -> None:
+        name = st.session_state.get("user_preset_delete_choice")
+        if name and self.parameter_manager.delete_user_preset(name):
+            st.toast(f"Deleted preset: {name}")
+        else:
+            st.toast(f"Could not delete preset: {name}", icon="⚠️")
+
     def file_upload_section(self, custom_upload_function) -> None:
+        self.upload_targets = {}
         custom_upload_function()
         # A local install already has the input files on disk.
         if st.session_state.location == "local":
@@ -1109,6 +1755,8 @@ class StreamlitUI:
         c1, _ = st.columns(2)
         if c1.button("⬇️ Download files", use_container_width=True):
             self.zip_and_download_files(Path(self.workflow_dir, "input-files"))
+        if data_import_ui.enabled():
+            data_import_ui.link_import_section(self.workflow_dir, self.upload_targets)
 
     def parameter_section(self, custom_parameter_function) -> None:
         st.toggle("Show advanced parameters", value=False, key="advanced")
@@ -1128,6 +1776,7 @@ class StreamlitUI:
 
         # Display preset buttons if presets are available for this workflow
         self.preset_buttons()
+        self.user_presets()
 
         custom_parameter_function()
 
@@ -1142,6 +1791,7 @@ class StreamlitUI:
             ):
                 self.parameter_manager.reset_to_default_parameters()
                 self.parameter_manager.clear_parameter_session_state()
+                self.parameter_manager.forget_applied_preset()
                 st.toast("Parameters reset to defaults")
                 st.rerun()
         with cols[1]:
@@ -1172,7 +1822,10 @@ class StreamlitUI:
                 key="param_import_uploader"
             )
             if up is not None:
-                with open(self.parameter_manager.params_file, "w") as f:
+                # encoding="utf-8" explicitly: the payload is decoded as utf-8
+                # just above, and writing it back in the platform codepage
+                # produced a params.json that no later utf-8 read could decode.
+                with open(self.parameter_manager.params_file, "w", encoding="utf-8") as f:
                     f.write(up.read().decode("utf-8"))
                 self.parameter_manager.clear_parameter_session_state()
                 st.toast("Parameters imported")
@@ -1273,9 +1926,11 @@ class StreamlitUI:
             with open(log_path, "r", encoding="utf-8") as f:
                 lines = f.readlines()
             content = "".join(lines)
-            # Check if workflow finished successfully
-            if "WORKFLOW FINISHED" in content:
+            outcome = classify_log_outcome(content)
+            if outcome == "finished":
                 st.success("**Workflow completed successfully.**")
+            elif outcome == "cancelled":
+                st.warning("**Workflow was cancelled.**")
             else:
                 st.error("**Errors occurred, check log file.**")
             # Apply line limit to static display
@@ -1329,6 +1984,9 @@ class StreamlitUI:
                 with st.expander("Error Details", expanded=True):
                     st.code(job_error)
 
+        elif job_status == "canceled":
+            st.warning(f"**Status: {label}** - Workflow was cancelled.")
+
         # Expandable job details
         with st.expander("Job Details", expanded=False):
             st.code(f"""Job ID: {status.get('job_id', 'N/A')}
@@ -1339,6 +1997,144 @@ Started: {status.get('started_at', 'N/A')}""")
 
     def results_section(self, custom_results_function) -> None:
         custom_results_function()
+
+    def results_download_section(
+        self, exclude: list[str] | None = None, results_dir: str | Path | None = None
+    ) -> None:
+        """
+        Offer every file under the workflow's results directory for download.
+
+        Lists the files, lets the user download any single one, and builds a
+        ZIP of the chosen result folders on request. Only the selected file (or
+        the ZIP) is read into memory, so large result sets stay cheap to render.
+
+        A local install exports instead: the user sets a folder at the top and
+        one button copies every listed file to ``<folder>/<workflow>-results``.
+
+        Args:
+            exclude: Names of files or folders to leave out (matched against
+                every part of a file's path relative to the results directory,
+                glob patterns allowed), e.g. caches: ``["insight_cache", "*.tmp"]``.
+            results_dir: Directory to offer. Defaults to ``<workflow_dir>/results``.
+        """
+        from fnmatch import fnmatch
+
+        results_dir = Path(results_dir or Path(self.workflow_dir, "results"))
+        exclude = list(exclude or [])
+
+        def excluded(rel: Path) -> bool:
+            return any(fnmatch(part, pattern) for part in rel.parts for pattern in exclude)
+
+        files = []
+        if results_dir.exists():
+            for path in sorted(results_dir.rglob("*")):
+                rel = path.relative_to(results_dir)
+                if path.is_file() and not excluded(rel):
+                    files.append(rel)
+
+        if not files:
+            st.info("No results yet. Run the workflow first.")
+            return
+
+        def folder_of(rel: Path) -> str:
+            return rel.parts[0] if len(rel.parts) > 1 else "."
+
+        def human_size(n_bytes: float) -> str:
+            for unit in ["B", "KB", "MB", "GB"]:
+                if n_bytes < 1024 or unit == "GB":
+                    return f"{n_bytes:.0f} {unit}" if unit == "B" else f"{n_bytes:.1f} {unit}"
+                n_bytes /= 1024
+
+        key_prefix = f"results-download-{Path(self.workflow_dir).name}"
+        local = st.session_state.get("location") == "local"
+        if local:
+            export_dir = export_folder_input(key_prefix)
+
+        st.dataframe(
+            [
+                {
+                    "Folder": folder_of(rel),
+                    "File": str(rel.relative_to(folder_of(rel))),
+                    "Size": human_size(Path(results_dir, rel).stat().st_size),
+                    "Modified": datetime.fromtimestamp(
+                        Path(results_dir, rel).stat().st_mtime
+                    ).strftime("%Y-%m-%d %H:%M"),
+                }
+                for rel in files
+            ],
+            hide_index=True,
+            width="stretch",
+        )
+
+        if local:
+            if st.button(
+                "📤 Export",
+                type="primary",
+                key=f"{key_prefix}-export",
+                width="stretch",
+            ):
+                export_files(
+                    [(Path(results_dir, rel), rel) for rel in files],
+                    Path(export_dir, f"{Path(self.workflow_dir).name}-results"),
+                )
+            return
+
+        c1, c2 = st.columns(2)
+
+        with c1:
+            st.markdown("**Single file**")
+            selected = st.selectbox(
+                "File",
+                files,
+                format_func=str,
+                key=f"{key_prefix}-file",
+                label_visibility="collapsed",
+            )
+            if selected is not None:
+                st.download_button(
+                    "⬇️ Download file",
+                    data=Path(results_dir, selected).read_bytes(),
+                    file_name=Path(selected).name,
+                    key=f"{key_prefix}-file-button",
+                    width="stretch",
+                )
+
+        with c2:
+            st.markdown("**ZIP archive**")
+            folders = sorted({folder_of(rel) for rel in files})
+            chosen = st.multiselect(
+                "Folders",
+                folders,
+                default=folders,
+                key=f"{key_prefix}-folders",
+                label_visibility="collapsed",
+            )
+            zip_path = Path(self.workflow_dir, "downloads", "results.zip")
+            prepared_key = f"{key_prefix}-prepared"
+            if st.button(
+                "📦 Prepare ZIP",
+                disabled=not chosen,
+                key=f"{key_prefix}-zip",
+                width="stretch",
+            ):
+                zip_path.parent.mkdir(parents=True, exist_ok=True)
+                selected_files = [rel for rel in files if folder_of(rel) in chosen]
+                with st.spinner(f"Compressing {len(selected_files)} files..."):
+                    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zip_file:
+                        for rel in selected_files:
+                            zip_file.write(Path(results_dir, rel), Path("results", rel))
+                # Keyed on the folder too: a multi-run workflow offers one run at a time.
+                st.session_state[prepared_key] = (str(results_dir), sorted(chosen))
+            if st.session_state.get(prepared_key) == (str(results_dir), sorted(chosen)) and zip_path.exists():
+                with open(zip_path, "rb") as f:
+                    st.download_button(
+                        "⬇️ Download ZIP",
+                        data=f,
+                        file_name=f"{Path(self.workflow_dir).name}-results.zip",
+                        mime="application/zip",
+                        key=f"{key_prefix}-zip-button",
+                        width="stretch",
+                    )
 
     def non_default_params_summary(self):
         # Display a summary of non-default TOPP parameters and all others (custom and python scripts)
@@ -1376,7 +2172,8 @@ Started: {status.get('started_at', 'N/A')}""")
         general = {}
 
         for k, v in params.items():
-            # skip if v is a file path
+            if k == "_defaults":
+                continue
             if isinstance(v, dict):
                 topp[k] = v
             elif ".py" in k:
@@ -1386,6 +2183,13 @@ Started: {status.get('started_at', 'N/A')}""")
                 python[script][k.split(".py")[1][1:]] = v
             else:
                 general[k] = v
+
+        # Merge _defaults into topp so summary shows custom defaults + user overrides
+        defaults = params.get("_defaults", {})
+        for tool_name, default_vals in defaults.items():
+            if tool_name not in topp:
+                topp[tool_name] = {}
+            topp[tool_name] = {**default_vals, **topp.get(tool_name, {})}
 
         markdown = []
 
