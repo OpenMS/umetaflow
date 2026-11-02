@@ -134,6 +134,7 @@ sync:
   - clean-up-workspaces.py
   - .github/workflows/build-desktop-app.yaml
   - .github/workflows/ci.yml
+  - .github/workflows/workflow-tests.yml
   - test.py
   - k8s/*
   - .github/workflows/build-and-test.yml
