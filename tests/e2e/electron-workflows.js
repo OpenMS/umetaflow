@@ -17,10 +17,15 @@ module.exports = async (t) => {
 
   await t.open("umetaflow_run");
   await t.clickButton("Start Workflow");
-  await t.waitForText("Workflow completed successfully.", {
-    timeout: RUN_TIMEOUT,
-    failOn: ["Errors occurred, check log file."],
-  });
+  try {
+    await t.waitForText("Workflow completed successfully.", {
+      timeout: RUN_TIMEOUT,
+      failOn: ["Errors occurred, check log file."],
+    });
+  } catch (err) {
+    printWorkflowLog(t);
+    throw err;
+  }
   await t.shot("workflow-finished");
 
   await t.open("umetaflow_results");
@@ -52,3 +57,23 @@ module.exports = async (t) => {
   if (!files.includes("meta-value-template.tsv")) throw new Error("Export: meta-value-template.tsv missing");
   if (!files.some((f) => f.endsWith(".parquet"))) throw new Error("Export: feature matrix parquet missing");
 };
+
+// The workflow's own log is in the workspace, not in the Streamlit log the CI
+// job prints, so a failed run shows it here.
+function printWorkflowLog(t) {
+  const appName = "UmetaFlow";
+  const roots = [
+    path.join(os.homedir(), ".config", appName),
+    path.join(os.homedir(), "Library", "Application Support", appName),
+    path.join(process.env.APPDATA || path.join(os.homedir(), "AppData", "Roaming"), appName),
+  ];
+  for (const root of roots) {
+    const log = path.join(root, "workspaces", "default", "umetaflow", "logs", "all.log");
+    if (!fs.existsSync(log)) continue;
+    const lines = fs.readFileSync(log, "utf8").split(/\r?\n/);
+    t.log(`Last lines of ${log}:`);
+    console.log(lines.slice(-150).join("\n"));
+    return;
+  }
+  t.log("No workflow log found");
+}
