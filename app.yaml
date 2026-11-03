@@ -156,7 +156,6 @@ sync:
   - utils/fasta.py
   - docs/toppframework.py
   - docs/user_guide.md
-  - docs/build_app.md
   - docs/installation.md
   - docs/win_exe_with_embed_py.md
   - docs/win_exe_with_pyinstaller.md
