@@ -27,7 +27,7 @@ UmetaFlow is further implemented as a [snakemake pipeline](https://github.com/NB
 `streamlit run app.py local`
 
 ### Docker
-The full image has OpenMS, the TOPP tools, SIRIUS and all Python dependencies:
+The full image has OpenMS, the TOPP tools and all Python dependencies, and on x86_64 also SIRIUS (SIRIUS 5 has no ARM build):
 
 `docker compose up -d --build`
 
