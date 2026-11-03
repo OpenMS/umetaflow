@@ -14,17 +14,21 @@ ARG PORT=8501
 # GitHub token to download latest OpenMS executable for Windows from Github action artifact.
 ARG GITHUB_TOKEN
 # Streamlit app Github user name (to download artifact from).
-ARG GITHUB_USER=axelwalter
+ARG GITHUB_USER=OpenMS
 # Streamlit app Github repository name (to download artifact from).
-ARG GITHUB_REPO=umetaflow-gui
+ARG GITHUB_REPO=umetaflow
 
 
 # Step 1: set up a sane build system
 USER root
 
+# Keep apt from stopping at interactive prompts: tzdata, pulled in by
+# later packages, otherwise waits for a timezone and the build hangs.
+ENV DEBIAN_FRONTEND=noninteractive TZ=Etc/UTC
+
 RUN apt-get -y update
 # note: streamlit in docker needs libgtk2.0-dev (see https://yugdamor.medium.com/importerror-libgthread-2-0-so-0-cannot-open-shared-object-file-no-such-file-or-directory-895b94a7827b)
-RUN apt-get install -y --no-install-recommends --no-install-suggests wget ca-certificates libgtk2.0-dev curl jq cron
+RUN apt-get install -y --no-install-recommends --no-install-suggests wget ca-certificates libgtk2.0-dev curl jq cron nginx
 RUN update-ca-certificates
 
 # Install Github CLI
@@ -44,11 +48,18 @@ RUN wget -q \
     && rm -f Miniforge3-Linux-x86_64.sh
 RUN mamba --version
 
-# Activate and configure the mamba environment
-RUN mamba update -n base -c conda-forge mamba && mamba info && mamba create -n streamlit-env python=3.10
-# note: activation of mamba needs to go to bashrc because every RUN command spawns new bash
+# Make /root traversable so the entrypoint can `source
+# /root/miniforge3/bin/activate ...` when the container runs as a non-root
+# user (apptainer/singularity maps the host UID into the container; the
+# default ubuntu /root is 0700 which would block path traversal). +x only,
+# not +r, so the directory listing remains private.
+RUN chmod o+x /root
+
+# Setup mamba environment.
+RUN mamba create -n streamlit-env python=3.10 
+RUN echo "mamba activate streamlit-env" >> ~/.bashrc
+SHELL ["/bin/bash", "--rcfile", "~/.bashrc"]
 SHELL ["mamba", "run", "-n", "streamlit-env", "/bin/bash", "-c"]
-RUN echo "source activate streamlit-env" > ~/.bashrc
 
 #################################### install streamlit
 # install packages
@@ -57,6 +68,12 @@ RUN mamba install pip
 RUN python -m pip install --upgrade pip
 RUN python -m pip install -r requirements.txt
 
+# Pre-create bind-mount targets so apptainer/singularity has a real attach
+# point. Docker auto-creates missing `-v` targets, but singularity uses a
+# read-only underlay and silently ignores `:rw` when the target isn't a
+# real directory in the SIF — writes then fail with EROFS even though the
+# host bind path is writable.
+RUN mkdir -p /workspaces-streamlit-template /mounted-data
 
 # create workdir and copy over all streamlit related files/folders
 WORKDIR /app
@@ -68,36 +85,56 @@ COPY example-data/ /app/example-data
 COPY gdpr_consent/ /app/gdpr_consent
 COPY hooks/ /app/hooks
 COPY src/ /app/src
+COPY utils/ /app/utils
 COPY app.py /app/app.py
 COPY settings.json /app/settings.json
 COPY default-parameters.json /app/default-parameters.json
+COPY presets.json /app/presets.json
 
 # For streamlit configuration
-COPY .streamlit/config.toml /app/.streamlit/config.toml
+COPY .streamlit/ /app/.streamlit/
 
 COPY clean-up-workspaces.py /app/clean-up-workspaces.py
 
 # add cron job to the crontab
 RUN echo "0 3 * * * /root/miniforge3/envs/streamlit-env/bin/python /app/clean-up-workspaces.py >> /app/clean-up-workspaces.log 2>&1" | crontab -
 
-# create entrypoint script to start cron service and launch streamlit app
-RUN echo "#!/bin/bash" > /app/entrypoint.sh
-RUN echo "service cron start" >> /app/entrypoint.sh
-RUN echo "mamba run --no-capture-output -n streamlit-env streamlit run app.py" >> /app/entrypoint.sh
-# make the script executable
+# Number of Streamlit server instances for load balancing (default: 1 = no load balancer)
+# Set to >1 to enable nginx load balancer with multiple Streamlit instances
+ENV STREAMLIT_SERVER_COUNT=1
+
+# Install the apptainer-compatible entrypoint (shared with the full image).
+# The script auto-skips the Redis/RQ section when redis-server is not
+# installed, so it works equally well in the simple variant.
+COPY docker/entrypoint.sh /app/entrypoint.sh
 RUN chmod +x /app/entrypoint.sh
+
+# Install the demo-seeding script run by the seed-demos initContainer
+# (k8s/base/streamlit-deployment.yaml). One copy of the logic, so what the
+# image ships is what tests/test_seed_demos.py executes.
+COPY docker/seed-demos.sh /app/docker/seed-demos.sh
+RUN chmod +x /app/docker/seed-demos.sh
 
 # Patch Analytics
 RUN mamba run -n streamlit-env python hooks/hook-analytics.py
 # Set Online Deployment
 RUN jq '.online_deployment = true' settings.json > tmp.json && mv tmp.json settings.json
 
-# Download latest OpenMS App executable for Windows from Github actions workflow.
+# Download the Windows installer built by the latest Windows workflow run on main.
 RUN if [ -n "$GH_TOKEN" ]; then \
         echo "GH_TOKEN is set, proceeding to download the release asset..."; \
-        gh run download -R ${GITHUB_USER}/${GITHUB_REPO} $(gh run list -R ${GITHUB_USER}/${GITHUB_REPO} -b main -e push -s completed -w "Build executable for Windows" --json databaseId -q '.[0].databaseId') -n OpenMS-App --dir /app; \
+        # The newest run on main that has the Windows installer; a failed macOS or
+        # Linux job in the same run must not fall back to an older installer.
+        for run in $(gh run list -R ${GITHUB_USER}/${GITHUB_REPO} -b main -e push -s completed -w "Build desktop app" -L 100 --json databaseId -q '.[].databaseId'); do \
+            gh run download -R ${GITHUB_USER}/${GITHUB_REPO} $run -n OpenMS-App-Electron --dir /app && break; \
+        done; \
+        # Saved under the name the Quickstart looks for when the release lookup fails.
+        f=$(ls /app/*-Setup.exe 2>/dev/null | head -n 1); \
+        if [ -n "$f" ] && [ "$f" != /app/OpenMS-App-Setup.exe ]; then mv "$f" /app/OpenMS-App-Setup.exe; fi; \
+        # A missing installer only hides the Windows download button; it does not fail the image.
+        ls /app/OpenMS-App-Setup.exe 2>/dev/null || echo "WARNING: no Windows installer found in the last 100 desktop runs on main."; \
     else \
-        echo "GH_TOKEN is not set, skipping the release asset download."; \
+        echo "GITHUB_TOKEN is not set, skipping the release asset download."; \
     fi
 
 # make sure that mamba environment is used

@@ -1,22 +1,33 @@
 {
     "app-name": "UmetaFlow",
-    "github-user": "axelwalter",
+    "github-user": "OpenMS",
     "version": "1.0.0",
-    "repository-name": "umetaflow-gui",
+    "repository-name": "umetaflow",
+    "legal_links": {
+        "impressum": "https://openms.de/impressum",
+        "privacy": "https://openms.de/privacy",
+        "terms": "https://openms.de/terms"
+    },
     "analytics": {
         "google-analytics": {
             "enabled": false,
             "tag": ""
         },
         "piwik-pro": {
+            "enabled": false,
+            "tag": ""
+        },
+        "matomo": {
             "enabled": true,
-            "tag": "57690c44-d635-43b0-ab43-f8bd3064ca06"
+            "url": "https://cdn.matomo.cloud/openms.matomo.cloud",
+            "tag": "yDGK8bfY"
         }
     },
     "online_deployment": false,
     "enable_workspaces": true,
     "test": true,
     "workspaces_dir": "..",
+    "local_data_dir": "",
     "queue_settings": {
         "default_timeout": 7200,
         "result_ttl": 86400
@@ -27,8 +38,27 @@
             "example-data/workspaces"
         ]
     },
+    "developer_mode": {
+        "password_sha256": "175550fe24ea744ec1bc4c56c1724c81913d90b7143a7153ae6c74a1ac66d05e"
+    },
+    "workspace_sync": {
+        "enabled": false,
+        "developer_only": true,
+        "public_url": "",
+        "token_ttl_hours": 24,
+        "max_file_gb": 50,
+        "max_workspace_gb": 200,
+        "chunk_mb": 32,
+        "workflows": {"umetaflow": "src.UmetaFlowTOPPWorkflow:Workflow"}
+    },
     "max_threads": {
         "local": 4,
         "online": 2
+    },
+    "data_import": {
+        "enabled": true,
+        "max_download_gb_online": 50,
+        "allowed_hosts": [],
+        "parallel_downloads": 4
     }
 }

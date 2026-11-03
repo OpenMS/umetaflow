@@ -1,0 +1,163 @@
+# App spec: what this app is. Schema and checker come from the template
+# (utils/app_spec.schema.json, `python -m utils.app_spec`); the weekly
+# template-sync job reads `template:` and `sync.app_owned` from here.
+# App-owned: template syncs never overwrite this file.
+spec_version: 1
+template:
+  repository: OpenMS/streamlit-template
+  branch: main
+app:
+  slug: umetaflow
+  name: UmetaFlow
+  description: 'Untargeted metabolomics: feature detection, alignment, linking, re-quantification, SIRIUS/GNPS
+    export and MS2 annotation.'
+  repository: OpenMS/umetaflow
+  domain: metabolomics
+inputs:
+  mzML-files:
+    types:
+    - mzML
+    multiple: true
+    description: LC-MS runs, uploaded on the File Upload page into the workspace.
+workflows:
+- name: umetaflow
+  class: src/UmetaFlowTOPPWorkflow.py:Workflow
+  inputs:
+  - mzML-files
+  steps:
+  - tool: HighResPrecursorMassCorrector
+    in: mzML-files
+    optional: true
+  - tool: FeatureFinderMetabo
+    in: mzML-files
+  - tool: MetaboliteAdductDecharger
+    in: FeatureFinderMetabo
+    optional: true
+  - tool: MapAlignerPoseClustering
+    in: FeatureFinderMetabo
+    collect: true
+    optional: true
+  - tool: MapRTTransformer
+    optional: true
+  - python: export_ffm_df
+  - tool: FeatureLinkerUnlabeledKD
+    collect: true
+  - python: export_consensus_df
+  - python: generate_FFMID_library
+    optional: true
+    note: re-quantification
+  - tool: FeatureFinderMetaboIdent
+    in: mzML-files
+    optional: true
+    note: re-quantification
+  - python: export_ffmid_df
+    optional: true
+  - python: merge_consensus_df
+    optional: true
+  - python: merge_ffm_ffmid_df
+    optional: true
+  - python: recreate_feature_maps
+    optional: true
+  - tool: SiriusExport
+    optional: true
+  - tool: IDMapper
+    optional: true
+  - tool: FileFilter
+    optional: true
+  - tool: GNPSExport
+    optional: true
+  - tool: FileConverter
+    optional: true
+  - tool: MetaboliteSpectralMatcher
+    optional: true
+  - python: annotate-ms2
+    optional: true
+  - python: annotate-sirius
+    optional: true
+  - python: run_ms2query
+    optional: true
+  - python: zip-result-files
+results:
+- role: table
+  title: Feature matrix
+  page: content/umetaflow_results.py
+- role: chromatogram
+  title: Extracted ion chromatograms
+  page: content/extracted_ion_chromatograms.py
+- role: custom
+  title: Statistics
+  page: content/statistics.py
+pages:
+- content/quickstart.py
+- content/file_upload.py
+- content/raw_data_viewer.py
+- content/umetaflow_configure.py
+- content/umetaflow_run.py
+- content/umetaflow_results.py
+- content/mz_calculator.py
+- content/extracted_ion_chromatograms.py
+- content/statistics.py
+deploy:
+  k8s:
+    enabled: false
+  docker_compose: true
+  desktop:
+  - windows
+  online_deployment: false
+sync:
+  app_owned:
+  - app.yaml
+  - app.py
+  - settings.json
+  - default-parameters.json
+  - presets.json
+  - README.md
+  - content/*
+  - src/python-tools/*
+  - example-data/*
+  - assets/*
+  - k8s/overlays/*
+  - src/UmetaFlowTOPPWorkflow.py
+  - src/dataframes.py
+  - src/eic.py
+  - src/masscalculator.py
+  - src/metabolomicsresults.py
+  - src/plotting/*
+  - src/stats.py
+  - src/view.py
+  - src/fileupload.py
+  - CLAUDE.md
+  - .streamlit/config.toml
+  - Dockerfile
+  - Dockerfile_simple
+  - docker-compose.yml
+  - clean-up-workspaces.py
+  - .github/workflows/build-desktop-app.yaml
+  - .github/workflows/ci.yml
+  - .github/workflows/workflow-tests.yml
+  - test.py
+  - k8s/*
+  - .github/workflows/build-and-test.yml
+  - .github/scripts/ci-assertions.sh
+  - .github/kind-config.yaml
+  - src/Workflow.py
+  - src/simpleworkflow.py
+  - src/mzmlfileworkflow.py
+  - src/run_subprocess.py
+  - src/peptide_mz_calculator.py
+  - utils/digest.py
+  - utils/fasta.py
+  - test_gui.py
+  - docs/toppframework.py
+  - docs/user_guide.md
+  - docs/build_app.md
+  - docs/installation.md
+  - docs/win_exe_with_embed_py.md
+  - docs/win_exe_with_pyinstaller.md
+  - tests/test_simple_workflow.py
+  - tests/test_run_subprocess.py
+  - tests/test_seed_demos.py
+  - tests/test_storage_health.py
+  - tests/test_tasks.py
+  - tests/test_workspace_sync.py
+  - tests/test_workspace_selector.py
