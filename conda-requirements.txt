@@ -1,4 +1,8 @@
 # Command line tools from conda-forge, installed into streamlit-env by the
 # template Dockerfiles (one package spec per line). Python packages go in
 # requirements.txt.
-sirius-ms==5.8.6
+#
+# SIRIUS 5 has no linux-aarch64 build on conda-forge (6.x does, but changes the
+# command line and needs an account), so the ARM images ship without it and
+# the workflow's SIRIUS steps are unavailable there.
+sirius-ms==5.8.6  # [x86_64]

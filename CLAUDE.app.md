@@ -17,7 +17,7 @@ UmetaFlow's own guidance, imported by the template-owned `CLAUDE.md` (which desc
 
 - `requirements.txt` lists direct dependencies only. `ms2query==1.5.3` pins `matchms<=0.26.4`, which needs `numpy<1.25`, so `numpy==1.24.4` and `pyopenms==3.2.0` (the last pyOpenMS that allows it) stay. The full Docker image builds pyOpenMS from the OpenMS source and runs it with that numpy; its import check covers this.
 - `torch` comes in through `ms2deepscore` (MS2Query). From torch 2.6 on, `torch.load` refuses the numpy arrays in the MS2Deepscore model file; `src/python-tools/run_ms2query.py` allows exactly those numpy types (`torch.serialization.add_safe_globals`) instead of turning the check off.
-- `conda-requirements.txt` holds SIRIUS (`sirius-ms`, conda-forge). The template's Dockerfiles install it into `streamlit-env`; the full image's `mono` runs ThermoRawFileParser.
+- `conda-requirements.txt` holds SIRIUS (`sirius-ms`, conda-forge), marked `# [x86_64]` because SIRIUS 5 has no ARM build: the ARM images ship without it. The template's Dockerfiles install it into `streamlit-env`; the full image's `mono` runs ThermoRawFileParser.
 
 ## Deployment
 
