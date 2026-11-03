@@ -6,6 +6,7 @@ disk once and sends one page at a time; its download button exports every row
 that passes the table's filters. Same approach as quantms-web's helper.
 """
 import hashlib
+import json
 import shutil
 import tempfile
 from pathlib import Path
@@ -44,8 +45,20 @@ def cache_id_for(name: str, df: pd.DataFrame) -> str:
 
 
 def cache_ready(cache_dir: Path, cache_id: str) -> bool:
-    """True once openms-insight finished a cache: it writes manifest.json last."""
-    return (Path(cache_dir) / cache_id / "manifest.json").is_file()
+    """True once openms-insight finished a cache: it writes manifest.json last.
+
+    A manifest that does not parse (e.g. truncated by a crash mid-write) means
+    the cache is unusable; it is removed so the caller rebuilds it.
+    """
+    cache = Path(cache_dir) / cache_id
+    try:
+        with open(cache / "manifest.json", encoding="utf-8") as f:
+            return isinstance(json.load(f), dict)
+    except FileNotFoundError:
+        return False
+    except (OSError, ValueError):
+        shutil.rmtree(cache, ignore_errors=True)
+        return False
 
 
 def drop_stale_caches(cache_dir: Path, name: str, keep: str) -> None:

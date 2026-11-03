@@ -89,3 +89,12 @@ def test_cache_ready_needs_manifest(tmp_path):
     assert not cache_ready(tmp_path, "t")
     (tmp_path / "t" / "manifest.json").write_text("{}")
     assert cache_ready(tmp_path, "t")
+
+
+def test_cache_ready_rejects_truncated_manifest(tmp_path):
+    from src.common.insight_tables import cache_ready
+
+    (tmp_path / "t").mkdir()
+    (tmp_path / "t" / "manifest.json").write_text('{"version": ')
+    assert not cache_ready(tmp_path, "t")
+    assert not (tmp_path / "t").exists()
