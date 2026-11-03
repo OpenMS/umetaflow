@@ -5,7 +5,7 @@ import tempfile
 import zipfile
 
 from rdkit import Chem
-from rdkit.Chem import Draw
+from rdkit.Chem.Draw import rdMolDraw2D
 
 import pandas as pd
 import numpy as np
@@ -283,6 +283,42 @@ def get_feature_intensity_plot(metabolite):
     )
     return fig
 
+def _theme_type():
+    """Active app theme, "dark" or "light" (light before the first rerun)."""
+    try:
+        return "dark" if st.context.theme.type == "dark" else "light"
+    except Exception:
+        return "light"
+
+
+def draw_structure(molecule, theme="light", size=(400, 300)):
+    """PNG bytes of a 2D structure on a transparent background.
+
+    Dark theme uses RDKit's dark-mode palette (light bonds, brightened heteroatom
+    colours), so the drawing stays legible on Streamlit's dark background instead
+    of showing as a white tile. Returns None for a molecule that failed to parse.
+    """
+    if molecule is None:
+        return None
+    drawer = rdMolDraw2D.MolDraw2DCairo(*size)
+    opts = drawer.drawOptions()
+    if theme == "dark":
+        rdMolDraw2D.SetDarkMode(opts)
+    opts.setBackgroundColour((0, 0, 0, 0))
+    rdMolDraw2D.PrepareAndDrawMolecule(drawer, molecule)
+    drawer.FinishDrawing()
+    return drawer.GetDrawingText()
+
+
+def show_structure(molecule, **image_kwargs):
+    """Show a structure drawing in the colours of the active theme."""
+    png = draw_structure(molecule, _theme_type())
+    if png is None:
+        st.caption("Structure could not be drawn.")
+        return
+    st.image(png, **image_kwargs)
+
+
 def spectralmatching_summary(s):
     s.index = [
         i.replace("SpectralMatch_", "").replace("SpectralMatch", "name")
@@ -304,9 +340,9 @@ def spectralmatching_summary(s):
         with c2:
             if "smiles" in row.index:
                 if row["smiles"] != "None":
-                    molecule = Chem.MolFromSmiles(row["smiles"])
-                    img = Draw.MolToImage(molecule)
-                    st.image(img, use_container_width=True)
+                    show_structure(
+                        Chem.MolFromSmiles(row["smiles"]), use_container_width=True
+                    )
 
 def sirius_summary(s):
     """s containing SIRIUS, CSI:FingerID and CANOPUS results for selected metabolite"""
@@ -332,9 +368,7 @@ def sirius_summary(s):
         st.dataframe(s, use_container_width=True)
     with c2:
         if "InChI" in s.index:
-            molecule = Chem.MolFromInchi(s["InChI"])
-            img = Draw.MolToImage(molecule)
-            st.image(img, width=500)
+            show_structure(Chem.MolFromInchi(s["InChI"]), width=500)
 
 
 def ms2query_summary(s):
@@ -348,9 +382,7 @@ def ms2query_summary(s):
         st.dataframe(s, use_container_width=True)
     with c2:
         if "smiles" in s.index:
-            molecule = Chem.MolFromSmiles(s["smiles"])
-            img = Draw.MolToImage(molecule)
-            st.image(img, use_container_width=True)
+            show_structure(Chem.MolFromSmiles(s["smiles"]), use_container_width=True)
 
 
 @st.cache_resource
