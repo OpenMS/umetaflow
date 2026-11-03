@@ -1,0 +1,92 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: streamlit
+  labels:
+    component: streamlit
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      component: streamlit
+  template:
+    metadata:
+      labels:
+        component: streamlit
+    spec:
+      initContainers:
+        # The seeding logic lives in docker/seed-demos.sh, not inline here, so
+        # that tests/test_seed_demos.py executes the script the image ships.
+        # It stages the copy in a private directory and renames it into place -
+        # rename(2) on a directory is atomic and fails on a non-empty target,
+        # so with replicas: 2 the winner renames and the loser stands down.
+        #
+        # The script bounds itself with `timeout` and always exits 0: this
+        # container gates pod start on the shared workspaces mount, and a pod
+        # held in Init by a slow or restarting NFS server would defeat the
+        # point of Streamlit being able to serve through a storage outage.
+        - name: seed-demos
+          image: openms-streamlit
+          imagePullPolicy: Always
+          command: ["/bin/sh", "/app/docker/seed-demos.sh"]
+          args:
+            - /app/example-data/workspaces
+            - /workspaces-streamlit-template/.demos
+          env:
+            # Wall clock for the whole seeding run, copy and stat calls alike.
+            - name: SEED_TIMEOUT
+              value: "300"
+          volumeMounts:
+            - name: workspaces
+              mountPath: /workspaces-streamlit-template
+      containers:
+        - name: streamlit
+          image: openms-streamlit
+          imagePullPolicy: Always
+          command: ["/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+              source /root/miniforge3/bin/activate streamlit-env
+              jq -s '.[0] * .[1]' /app/settings.json /app/settings-overrides.json > /tmp/settings-merged.json && mv /tmp/settings-merged.json /app/settings.json
+              exec streamlit run app.py --server.address 0.0.0.0
+          ports:
+            - containerPort: 8501
+          env:
+            - name: REDIS_URL
+              value: "redis://redis:6379/0"
+            - name: WORKSPACES_DIR
+              value: "/workspaces-streamlit-template"
+          volumeMounts:
+            - name: workspaces
+              mountPath: /workspaces-streamlit-template
+            - name: config
+              mountPath: /app/settings-overrides.json
+              subPath: settings-overrides.json
+              readOnly: true
+            - name: admin-secrets
+              mountPath: /app/admin-secrets
+              readOnly: true
+          readinessProbe:
+            httpGet:
+              path: /_stcore/health
+              port: 8501
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /_stcore/health
+              port: 8501
+            initialDelaySeconds: 30
+            periodSeconds: 30
+      volumes:
+        - name: workspaces
+          persistentVolumeClaim:
+            claimName: workspaces-manila-pvc
+        - name: config
+          configMap:
+            name: streamlit-config
+        - name: admin-secrets
+          secret:
+            secretName: streamlit-secrets
+            optional: true

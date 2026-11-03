@@ -1,0 +1,4 @@
+# Command line tools from conda-forge, installed into streamlit-env by the
+# template Dockerfiles (one package spec per line). Python packages go in
+# requirements.txt.
+sirius-ms==5.8.6

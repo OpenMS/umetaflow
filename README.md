@@ -12,11 +12,11 @@ UmetaFlow is further implemented as a [snakemake pipeline](https://github.com/NB
 ## Installation
 1. Clone this repository
 
-`git clone https://github.com/axelwalter/umetaflow-gui.git`
+`git clone https://github.com/OpenMS/umetaflow.git`
 
-2. Change into the `umetaflow-gui` folder
+2. Change into the `umetaflow` folder
 
-`cd umetaflow-gui`
+`cd umetaflow`
 
 3. Install all Python modules specified in the requirements file with pip
 
@@ -25,6 +25,13 @@ UmetaFlow is further implemented as a [snakemake pipeline](https://github.com/NB
 4. Launch the streamlit app locally in your browser
 
 `streamlit run app.py local`
+
+### Docker
+The full image has OpenMS, the TOPP tools, SIRIUS and all Python dependencies:
+
+`docker compose up -d --build`
+
+Set `GITHUB_TOKEN` in the environment to bundle the latest Windows installer; it is passed to the build as a secret and not stored in the image.
 
 ### Windows
 1. Visit the [UmetaFlow web app](https://abi-services.cs.uni-tuebingen.de/umetaflow/)
