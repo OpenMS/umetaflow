@@ -13,16 +13,14 @@ import plotly.express as px
 import plotly.graph_objects as go
 from itertools import cycle
 
-from src.common.common import show_fig, load_parquet, export_folder_input
+import json
 
-COLOR_SCALE = [
-    (0.00, "rgba(233, 233, 233, 1.0)"),
-    (0.01, "rgba(243, 236, 166, 1.0)"),
-    (0.1, "rgba(255, 168, 0, 1.0)"),
-    (0.2, "rgba(191, 0, 191, 1.0)"),
-    (0.4, "rgba(68, 0, 206, 1.0)"),
-    (1.0, "rgba(33, 0, 101, 1.0)"),
-]
+from openms_insight import LinePlot, MirrorPlot, StateManager
+
+from src.common.common import show_fig, load_parquet, export_folder_input
+from src.common.insight_tables import cache_id_for, cache_ready, drop_stale_caches
+from src.feature_explorer import FeatureExplorer
+from src.ms2_viewer import LIBRARY_SIDE, QUERY_SIDE, load_ms2_data, peaks_frame
 
 
 def add_color_column(df):
@@ -107,6 +105,7 @@ def filter_dialog(df):
 
 
 def metabolite_selection():
+    """Draw the feature table and return its FeatureExplorer (None if there are no features)."""
     df = load_parquet(
         Path(st.session_state.results_dir, "consensus-dfs", "feature-matrix.parquet")
     )
@@ -115,17 +114,6 @@ def metabolite_selection():
         st.error("FeatureMatrix is empty.")
         return None
 
-    sample_cols = sorted([col for col in df.columns if col.endswith(".mzML")])
-
-    # Insert a column with normalized intensity values to display as barchart column in dataframe
-    df.insert(
-        1,
-        "intensity",
-        df.apply(lambda row: [int(row[col]) for col in sample_cols], axis=1),
-    )
-    df["intensity"] = df["intensity"].apply(
-        lambda intensities: [i / max(intensities) for i in intensities]
-    )
     c1, c2, c3 = st.columns([0.5, 0.25, 0.25])
     if "feature-matrix-filtered" in st.session_state:
         if c2.button("❌ Reset", use_container_width=True):
@@ -139,40 +127,17 @@ def metabolite_selection():
         if not st.session_state["feature-matrix-filtered"].empty:
             df = st.session_state["feature-matrix-filtered"]
     c1.markdown(f"**Feature Matrix** ({df.shape[0]} metabolites)")
+    st.caption(
+        "Click a feature in the table or in the feature map (retention time vs *m/z*, "
+        "colored by the highest intensity across samples) to see its details. "
+        "Column headers sort and filter the table; its download button exports the filtered rows."
+    )
 
-    tab1, tab2 = st.tabs(["✅ **Selection**", "👀 View"])
-    with tab2:
-        fig = plot_consensus_map(df)
-        show_fig(fig, "consensus-map")
-    with tab1:
-        event = st.dataframe(
-            df,
-            column_order=["intensity", "RT", "mz", "charge", "adduct"],
-            hide_index=False,
-            column_config={
-                "intensity": st.column_config.BarChartColumn(
-                    width="small",
-                    help=", ".join(
-                        [
-                            str(Path(col).stem)
-                            for col in sorted(df.columns)
-                            if col.endswith(".mzML")
-                        ]
-                    ),
-                ),
-            },
-            height=300,
-            use_container_width=True,
-            on_select="rerun",
-            selection_mode="single-row",
-        )
-        rows = event.selection.rows
-        if rows:
-            return df.iloc[rows[0], :]
-        st.info(
-            "💡 Select a row (metabolite) in the feature matrix for more information."
-        )
-        return None
+    explorer = FeatureExplorer(
+        df, cache_dir=Path(st.session_state.results_dir, "insight-cache")
+    )
+    explorer.table()
+    return explorer
 
 
 def metabolite_metrics(metabolite):
@@ -385,72 +350,6 @@ def ms2query_summary(s):
             show_structure(Chem.MolFromSmiles(s["smiles"]), use_container_width=True)
 
 
-@st.cache_resource
-def plot_consensus_map(df):
-    fig = go.Figure()
-
-    df["mean"] = df.loc[:, [c for c in df.columns if c.endswith(".mzML")]].mean(axis=1)
-    df = df.sort_values("mean")
-
-    # define custom data for hovering
-    meta_values = [
-        df.index,
-        df["mz"].round(5),
-        df["RT"].round(),
-        df["mean"],
-        df["charge"],
-        df["quality"],
-    ]
-
-    hovertemplate = """
-<b>name: %{customdata[0]}<br>
-mz: %{customdata[1]}<br>
-RT: %{customdata[2]}<br>
-intensity: %{customdata[3]}<br>
-charge: %{customdata[4]}<br>
-quality: %{customdata[5]}<br>
-"""
-
-    if "adduct" in df.columns:
-        meta_values.append(df["adduct"])
-        hovertemplate += "adduct: %{customdata[6]}<br>"
-
-    for s in [col for col in df.columns if col.endswith("mzML")]:
-        meta_values.append(df[s])
-        hovertemplate += (
-            s[:-5] + ": %{customdata[" + str(len(meta_values) - 1) + "]}<br>"
-        )
-
-    customdata = np.stack(meta_values, axis=-1)
-
-    fig.add_trace(
-        go.Scattergl(
-            name="feature",
-            x=df["RT"],
-            y=df["mz"],
-            mode="markers",
-            marker_color=df["mean"],
-            marker_symbol="square",
-            marker_size=12,
-            customdata=customdata,
-            hovertemplate=hovertemplate,
-        )
-    )
-    fig.update_layout(
-        xaxis_title="retention time",
-        yaxis_title="m/z",
-        showlegend=False,
-        plot_bgcolor="rgb(255,255,255)",
-        margin=dict(l=0, r=0, t=0, b=0),
-    )
-    fig.update_traces(
-        showlegend=False,
-        marker_colorscale=COLOR_SCALE,
-        selector=dict(type="scattergl"),
-    )
-
-    return fig
-
 RESULT_FILES_INFO = """**Feature Matrix**:
                         
 The main result file with consensus feature meta data (*m/z*, retention time, charge, adduct), intensities, annotations and additional information such as original & consensus feature IDs (for mapping with sample feature map data) and re-quantification status. In **tsv** and **parquet** format.
@@ -527,11 +426,11 @@ def help_section():
                 
 This page provides a detailed overview of the analysis results for your UmetaFlow run. Here's how to navigate and interpret the information.
 
-**1. Metabolite Selection**
+**1. Feature table and feature map**
 
-Use checkbox on the left side of the table to select a metabolite from the final FeatureMatrix or take a look at a scatter plot to check out consensus feature distribution.
+Click a row in the feature table, or a point in the feature map (retention time vs *m/z*), to select a metabolite. Both views stay in sync. The table has one intensity column per sample, the number of samples a feature was found in, and which tools annotated it. Sort or filter by any column header, and download the filtered table as CSV.
 
-The table contains an intensity column with bar charts for quick identificantion of differential metabolites. Hover over the column header to see the order of samples in the bar chart.
+The chromatograms of the selected feature in every sample are shown next to the feature map.
 
 💡 Use the option to **filter** the data.
 
@@ -544,6 +443,10 @@ Displays key metrics and statistics for the selected metabolite, such as:
 - charge
 - adduct
 - if it has been re-quantified
+
+**🔬 MS2 spectrum**
+
+The MS2 spectrum recorded for the feature. If the in-house library matched it, the library spectrum is mirrored below it, with the peaks that pair up highlighted, the match score, the cosine similarity and the number of matched peaks.
 
 **3. Annotations:**
                     
@@ -575,3 +478,114 @@ This section shows quantitative differences in your samples. Check out the chrom
 - Tables offer a search and download button in the top right corner
 - If new results don't appear, try to reset the filter (can contain old results)
 """)
+
+@st.cache_data(show_spinner=False)
+def _load_ms2_data(results_dir: str, library: str, tol_ppm: float, mtimes: tuple):
+    # mtimes only key the cache, so a re-run of the workflow invalidates it
+    return load_ms2_data(Path(results_dir), Path(library) if library else None, tol_ppm)
+
+
+def _ms2_inputs(workflow_dir: Path):
+    """MS2 library file and fragment tolerance (ppm) the spectral matching used."""
+    library_dir = Path(workflow_dir, "input-files", "ms2-library")
+    libraries = sorted(p for p in library_dir.glob("*") if p.is_file() and p.name != "external_files.txt") if library_dir.is_dir() else []
+    tol = 500.0  # MetaboliteSpectralMatcher default
+    for name in ("params-translated.json", "params.json"):
+        path = Path(workflow_dir, name)
+        if path.is_file():
+            try:
+                msm = json.loads(path.read_text()).get("MetaboliteSpectralMatcher", {})
+            except ValueError:
+                continue
+            if msm.get("algorithm:mass_error_unit", "ppm") == "ppm":
+                tol = float(msm.get("algorithm:frag_mass_error_value", tol))
+            break
+    return (libraries[0] if libraries else None), tol
+
+
+def ms2_section(metabolite, workflow_dir: Path) -> None:
+    """MS2 spectrum of the selected feature; library hits as a mirror plot."""
+    results_dir = Path(workflow_dir, "results")
+    library, tol = _ms2_inputs(Path(workflow_dir))
+    sources = [results_dir / "gnps-export" / "MS2.mgf", results_dir / "spectral-matcher" / "MS2-matches.mzTab"]
+    if library:
+        sources.append(library)
+    mtimes = tuple(p.stat().st_mtime_ns if p.exists() else 0 for p in sources)
+    data = _load_ms2_data(str(results_dir), str(library or ""), tol, mtimes)
+    if data is None:
+        return
+    with st.expander("🔬 **MS2 spectrum**", expanded=True):
+        query_ids = data.feature_spectra.get(str(metabolite.name), [])
+        matches = data.matches.get(str(metabolite.name), [])
+        if not query_ids:
+            st.info("No MS2 spectrum was recorded for this feature.")
+            return
+
+        cache_dir = Path(results_dir, "insight-cache")
+        peaks = peaks_frame(data)
+        cache_id = cache_id_for("ms2_peaks", data.peaks)
+        state = StateManager("umetaflow_ms2")
+        mirrored = [m for m in matches if m.library_id is not None]
+        labels = {row.spectrum_id: row.label for row in data.spectra.itertuples()}
+
+        if mirrored:
+            options = list(range(len(mirrored)))
+            pick = 0
+            if len(mirrored) > 1:
+                pick = st.selectbox(
+                    "library hit", options,
+                    format_func=lambda i: f"{mirrored[i].name} (score {mirrored[i].score:g})",
+                    key="ms2-library-hit",
+                )
+            match = mirrored[pick]
+            mirror_id = f"mirror_{cache_id}"
+            if not cache_ready(cache_dir, mirror_id):
+                drop_stale_caches(cache_dir, "mirror_ms2_peaks", mirror_id)
+                MirrorPlot(
+                    cache_id=mirror_id, data=peaks.lazy(), cache_path=str(cache_dir),
+                    filters_top={QUERY_SIDE: "spectrum_id"}, filters_bottom={LIBRARY_SIDE: "spectrum_id"},
+                    filter_defaults_top={QUERY_SIDE: -1}, filter_defaults_bottom={LIBRARY_SIDE: -1},
+                    interactivity={"ms2_peak": "peak_id"},
+                    x_column="mz", y_column="intensity",
+                    highlight_column="matched", annotation_column="label",
+                    title_top="feature MS2", title_bottom="library spectrum",
+                    x_label="m/z", y_label="relative intensity (%)",
+                )
+            state.set_selection(QUERY_SIDE, int(match.query_id))
+            state.set_selection(LIBRARY_SIDE, int(match.library_id))
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("library hit", match.name)
+            c2.metric("match score", f"{match.score:g}" if match.score is not None else "–")
+            c3.metric("cosine", f"{match.cosine:.2f}" if match.cosine is not None else "–")
+            c4.metric("matched peaks", match.matched_peaks)
+            st.caption(
+                f"Top: the feature's MS2 spectrum ({labels.get(match.query_id, '')}). Bottom, mirrored: the library "
+                f"spectrum of {match.name}. Peaks that pair up within {tol:g} ppm are highlighted (labeled from 5 % intensity). "
+                "The cosine uses square-root intensities of the paired peaks."
+            )
+            MirrorPlot(cache_id=mirror_id, cache_path=str(cache_dir))(
+                key="umetaflow_ms2_mirror", state_manager=state, height=420
+            )
+        else:
+            pick = query_ids[0]
+            if len(query_ids) > 1:
+                pick = st.selectbox("spectrum", query_ids, format_func=lambda i: labels.get(i, str(i)),
+                                    key="ms2-query-spectrum")
+            line_id = f"ms2line_{cache_id}"
+            if not cache_ready(cache_dir, line_id):
+                drop_stale_caches(cache_dir, "ms2line_ms2_peaks", line_id)
+                LinePlot(
+                    cache_id=line_id, data=peaks.lazy(), cache_path=str(cache_dir),
+                    filters={QUERY_SIDE: "spectrum_id"}, filter_defaults={QUERY_SIDE: -1},
+                    interactivity={"ms2_peak": "peak_id"},
+                    x_column="mz", y_column="intensity",
+                    title="feature MS2", x_label="m/z", y_label="relative intensity (%)",
+                )
+            state.set_selection(QUERY_SIDE, int(pick))
+            if matches:
+                st.caption(f"Library hit {matches[0].name}: its spectrum was not found in the uploaded library.")
+            else:
+                st.caption("No spectral library hit for this feature.")
+            LinePlot(cache_id=line_id, cache_path=str(cache_dir))(
+                key="umetaflow_ms2_line", state_manager=state, height=380
+            )

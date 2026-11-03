@@ -1271,15 +1271,30 @@ class Workflow(WorkflowManager):
         with c2:
             download_section(self.workflow_dir)
 
-        # Select a metabolite from the final FeatureMatrix
-        metabolite = metabolite_selection()
-
-        if metabolite is None:
+        # Feature table (MZmine-style feature list), linked to the feature map below
+        explorer = metabolite_selection()
+        if explorer is None:
             return
+        metabolite = explorer.selected()
+
+        c1, c2 = st.columns(2)
+        with c1:
+            with st.expander("**🗺️ Feature map**", expanded=True):
+                explorer.feature_map(height=400)
+        if metabolite is None:
+            c2.info("💡 Select a feature in the table or the feature map for more information.")
+            return
+        with c2:
+            with st.expander(f"**📈 Chromatograms**", expanded=True):
+                chrom_data = get_chroms_for_each_sample(metabolite)
+                show_fig(get_feature_chromatogram_plot(chrom_data), f"chromatograms_{metabolite.name}")
 
         # Metrics
         with st.expander("📝 **Summary**", expanded=True):
             metabolite_metrics(metabolite)
+
+        # MS2 spectrum, library hits as mirror plot
+        ms2_section(metabolite, self.workflow_dir)
 
         # Annotations
         spectralmatching = metabolite[
@@ -1306,18 +1321,5 @@ class Workflow(WorkflowManager):
             with st.expander(f"🤖 **MS2Query**", expanded=True):
                 ms2query_summary(ms2query)
 
-        # Chromatograms and Intensities
-        chrom_data = get_chroms_for_each_sample(metabolite)
-        chrom_fig = get_feature_chromatogram_plot(chrom_data)
-        auc_fig = get_feature_intensity_plot(metabolite)
-
-        c1, c2 = st.columns(2)
-        with c1:
-            with st.expander(f"**📈 Chromatograms**", expanded=True):
-                show_fig(chrom_fig, f"chromatograms_{metabolite.name}")
-
-        with c2:
-            with st.expander(f"**📊 Intensities**", expanded=True):
-                show_fig(auc_fig, f"AUC_{metabolite.name}")
-
-
+        with st.expander(f"**📊 Intensities**", expanded=True):
+            show_fig(get_feature_intensity_plot(metabolite), f"AUC_{metabolite.name}")
