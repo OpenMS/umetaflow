@@ -107,6 +107,10 @@ deploy:
     storage: 100Gi
     worker_tier: low
   docker_compose: true
+  # No simple ARM image: PyPI has no linux/aarch64 wheel of pyopenms 3.2.0, the
+  # last release that allows numpy<1.25 (MS2Query). The full ARM image builds
+  # pyOpenMS from source and has it.
+  images: [full-amd64, simple-amd64, full-arm64]
   desktop:
   - windows
   online_deployment: false
