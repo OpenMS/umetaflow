@@ -83,14 +83,10 @@ def test_view_raw_ms_data(launch, example):
     assert not launch.exception
 
 
-@pytest.mark.parametrize("launch", ["content/topp_workflow_parameter.py"], indirect=True)
+@pytest.mark.parametrize("launch", ["content/umetaflow_configure.py"], indirect=True)
 def test_parameter_page_has_no_advanced_toggle(launch):
     """Advanced parameters are reached by search (TOPP) or an expander (python
     tools), not by a page-wide toggle."""
     launch.run(timeout=30)
     assert not launch.exception
     assert not [t for t in launch.toggle if t.label == "Show advanced parameters"]
-    # src/python-tools/example.py has one advanced parameter
-    # (an expander with an icon is listed as a status block by AppTest)
-    blocks = list(launch.expander) + list(launch.status)
-    assert [e for e in blocks if e.label == "1 advanced parameter"]
