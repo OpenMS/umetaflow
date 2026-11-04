@@ -13,6 +13,8 @@ Streamlit-free.
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from pathlib import Path
 
 import pandas as pd
@@ -28,6 +30,8 @@ def tags_path(results_dir: str | Path) -> Path:
 
 def clean_tags(tags) -> list[str]:
     """Strip, drop empty and duplicate tags (case-insensitive), keep the first spelling, sort."""
+    if isinstance(tags, str):
+        tags = [tags]
     seen: dict[str, str] = {}
     for tag in tags or []:
         if tag is None:
@@ -98,9 +102,15 @@ def set_feature_tags(results_dir: str | Path, feature: pd.Series, tags) -> dict[
     else:
         raw.pop(key, None)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(raw, indent=1, sort_keys=True))
-    tmp.replace(path)
+    # A temporary file of its own per write, so two saves never share one
+    fd, tmp = tempfile.mkstemp(prefix=".feature-tags-", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w") as handle:
+            handle.write(json.dumps(raw, indent=1, sort_keys=True))
+        os.replace(tmp, path)
+    except BaseException:
+        Path(tmp).unlink(missing_ok=True)
+        raise
     return load_tags(results_dir)
 
 
@@ -123,3 +133,16 @@ def has_any_tag(df: pd.DataFrame, tags: dict[str, list[str]], wanted) -> pd.Seri
         [bool(wanted_keys & {t.casefold() for t in tags.get(str(i), [])}) for i in df.index],
         index=df.index,
     )
+
+
+def apply_tag_filter(df: pd.DataFrame, tags: dict[str, list[str]], include=(), exclude=()) -> pd.DataFrame:
+    """Rows of ``df`` tagged with any of ``include`` (all rows if empty) and none of ``exclude``.
+
+    Applied to the current tags on every rerun, so editing a tag updates a
+    filtered table right away.
+    """
+    if clean_tags(include):
+        df = df[has_any_tag(df, tags, include)]
+    if clean_tags(exclude):
+        df = df[~has_any_tag(df, tags, exclude)]
+    return df

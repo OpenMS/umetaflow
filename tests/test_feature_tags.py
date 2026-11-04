@@ -10,6 +10,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from src.feature_explorer import build_feature_table  # noqa: E402
 from src.feature_tags import (  # noqa: E402
     TAGS_FILE,
+    apply_tag_filter,
     all_tags,
     clean_tags,
     has_any_tag,
@@ -85,3 +86,58 @@ def test_feature_table_has_a_tags_column_before_the_samples():
     cols = list(table.columns)
     assert cols.index("tags") < cols.index("A")
     assert build_feature_table(df)["tags"].tolist() == ["", "", ""]
+
+
+def test_a_string_is_one_tag():
+    assert clean_tags("follow up") == ["follow up"]
+
+
+def test_apply_tag_filter_reads_the_current_tags():
+    df = _matrix()
+    tags = {"f1": ["contaminant"], "f3": ["standard"]}
+    assert apply_tag_filter(df, tags, ["standard"]).index.tolist() == ["f3"]
+    assert apply_tag_filter(df, tags, exclude=["contaminant"]).index.tolist() == ["f2", "f3"]
+    assert apply_tag_filter(df, tags).index.tolist() == ["f1", "f2", "f3"]
+    # after the tag is removed, the same criteria drop the feature
+    assert apply_tag_filter(df, {"f1": ["contaminant"]}, ["standard"]).empty
+
+
+def _editor_app(results_dir):
+    import sys
+    from pathlib import Path
+
+    import pandas as pd
+    import streamlit as st
+
+    sys.path.insert(0, str(Path.cwd()))
+    from src.metabolomicsresults import feature_tags_editor
+
+    st.session_state.results_dir = Path(results_dir)
+    row = pd.Series({"mz": 235.118873, "RT": 301.228, "charge": 1}, name="f1")
+    feature_tags_editor(row)
+
+
+def test_editor_does_not_save_a_reordered_selection(tmp_path):
+    from unittest import mock
+
+    from streamlit.testing.v1 import AppTest
+
+    df = _matrix()
+    set_feature_tags(tmp_path, df.loc["f1"], ["contaminant", "standard"])
+    at = AppTest.from_function(_editor_app, args=(str(tmp_path),), default_timeout=30).run()
+    assert at.multiselect[0].value == ["contaminant", "standard"]
+    with mock.patch("src.feature_tags.os.replace") as replace:
+        at.multiselect[0].set_value(["standard", "contaminant"]).run()
+    replace.assert_not_called()
+    assert not at.exception
+
+
+def test_editor_ignores_tags_stored_for_another_feature_with_the_same_id(tmp_path):
+    from streamlit.testing.v1 import AppTest
+
+    moved = _matrix().loc["f1"].copy()
+    moved["RT"] = 400.0
+    set_feature_tags(tmp_path, moved, ["contaminant"])
+    at = AppTest.from_function(_editor_app, args=(str(tmp_path),), default_timeout=30).run()
+    assert at.multiselect[0].value == []
+    assert "contaminant" in at.multiselect[0].options
