@@ -111,7 +111,14 @@ RUN cp -r openms-build/lib /openms/lib
 ENV LD_LIBRARY_PATH="/openms/lib/:${LD_LIBRARY_PATH}"
 
 # Copy share folder, add to PATH, remove source directory.
-RUN cp -r OpenMS/share/OpenMS /openms/share
+# From OpenMS 3.6 on the TOPP tool registry (share/OpenMS/TOOLS/*.tsv) is
+# generated into the build directory, not kept in the source tree. Without it
+# every TOPP tool aborts on start ("The TOPP tool registry ... is empty"), so
+# it is copied next to the source share.
+RUN cp -r OpenMS/share/OpenMS /openms/share \
+    && if [ -d openms-build/share/OpenMS/TOOLS ]; then \
+        mkdir -p /openms/share/TOOLS && cp -r openms-build/share/OpenMS/TOOLS/. /openms/share/TOOLS/; \
+    fi
 RUN rm -rf OpenMS
 ENV OPENMS_DATA_PATH="/openms/share/"
 
@@ -165,6 +172,8 @@ COPY src/ /app/src
 COPY app.py /app/app.py
 COPY settings.json /app/settings.json
 COPY default-parameters.json /app/default-parameters.json
+COPY presets.json /app/presets.json
+COPY parameter-names.json /app/parameter-names.json
 
 # For streamlit configuration
 COPY .streamlit/ /app/.streamlit
