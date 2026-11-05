@@ -111,6 +111,7 @@ sync:
   - settings.json
   - default-parameters.json
   - presets.json
+  - parameter-names.json
   - README.md
   - content/*
   - src/python-tools/*
@@ -126,17 +127,14 @@ sync:
   - src/stats.py
   - src/view.py
   - src/fileupload.py
-  - CLAUDE.md
   - .streamlit/config.toml
   - Dockerfile
   - Dockerfile_simple
   - docker-compose.yml
   - clean-up-workspaces.py
   - .github/workflows/build-desktop-app.yaml
-  - .github/workflows/ci.yml
   - .github/workflows/workflow-tests.yml
   - test.py
-  - k8s/*
   - .github/workflows/build-and-test.yml
   - .github/scripts/ci-assertions.sh
   - .github/kind-config.yaml
@@ -161,3 +159,5 @@ sync:
   - tests/test_tasks.py
   - tests/test_workspace_sync.py
   - tests/test_workspace_selector.py
+  - CLAUDE.app.md
+  - conda-requirements.txt
