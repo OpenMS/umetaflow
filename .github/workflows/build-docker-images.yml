@@ -18,6 +18,14 @@ jobs:
       # hosted runner's free disk is not enough for that without this.
       run: |
         sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+        # Exporting the full image (OpenMS built from source) still ran out
+        # of disk with only the line above, so take the remaining toolchains
+        # and the runner's cached docker images too (as the template's
+        # build-and-test.yml does).
+        sudo rm -rf /opt/hostedtoolcache /usr/local/.ghcup /usr/share/swift \
+          /usr/local/share/powershell /usr/local/share/chromium /usr/local/share/boost \
+          /opt/az /opt/microsoft /opt/google /usr/lib/jvm || true
+        docker system prune -af >/dev/null 2>&1 || true
         sudo apt-get clean
         df -h
     - uses: actions/checkout@v3
@@ -34,6 +42,14 @@ jobs:
       # hosted runner's free disk is not enough for that without this.
       run: |
         sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc || true
+        # Exporting the full image (OpenMS built from source) still ran out
+        # of disk with only the line above, so take the remaining toolchains
+        # and the runner's cached docker images too (as the template's
+        # build-and-test.yml does).
+        sudo rm -rf /opt/hostedtoolcache /usr/local/.ghcup /usr/share/swift \
+          /usr/local/share/powershell /usr/local/share/chromium /usr/local/share/boost \
+          /opt/az /opt/microsoft /opt/google /usr/lib/jvm || true
+        docker system prune -af >/dev/null 2>&1 || true
         sudo apt-get clean
         df -h
     - uses: actions/checkout@v3
