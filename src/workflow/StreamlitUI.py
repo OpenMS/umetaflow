@@ -4,7 +4,7 @@ from pathlib import Path
 import shutil
 import filecmp
 import subprocess
-from typing import Any, Union, List, Literal, Callable
+from typing import Any, Callable, Dict, List, Literal, Union
 import json
 import math
 import os
@@ -57,6 +57,12 @@ from src.workflow.ExperimentalDesign import (
     to_openms_design,
 )
 from src.workflow.vendor_files import extract_bruker_zip, has_type
+from src.workflow.settings_io import (
+    THREADS_USER_MARKER,
+    local_thread_default,
+    local_threads_pinned,
+    usable_cpu_count,
+)
 from src.data_import import ui as data_import_ui
 from src.workflow.ParameterManager import (
     InvalidParameterFileError,
@@ -216,7 +222,7 @@ class StreamlitUI:
         key: str,
         file_types: Union[str, List[str]],
         name: str = "",
-        fallback: Union[List, str] = None,
+        fallback: Union[List, str, Dict[str, str]] = None,
         suggest_folders: bool = False,
         list_files: bool = True,
     ) -> None:
@@ -232,7 +238,10 @@ class StreamlitUI:
                 a zip archive. Convert vendor files before use with
                 ``CommandExecutor.convert_to_mzml()``.
             name (str, optional): Display name for the upload component. Defaults to the key if not provided.
-            fallback (Union[List, str], optional): Default files to use if no files are uploaded.
+            fallback (Union[List, str, Dict[str, str]], optional): Default files
+                to use if no files are uploaded. A dict maps each file to the
+                folder it is put in when it is copied, so the examples arrive
+                sorted.
             suggest_folders (bool, optional): Offer to sort the files into folders
                 by the groups their names suggest (``ctrl_R1``, ``ctrl_R2``,
                 ``treated_R1`` ...). Folders are labels kept in
@@ -484,6 +493,7 @@ class StreamlitUI:
                 c1, _ = st.columns(2)
                 if not Path(files_dir, f).exists():
                     shutil.copy(f, Path(files_dir, Path(f).name))
+            self._fallback_folders(key, fallback)
             current_files = [f.name for f in files_dir.iterdir() if f.name != "external_files.txt"]
             c1.warning("**No data yet. Using example data file(s).**")
         else:
@@ -725,20 +735,31 @@ class StreamlitUI:
         def browse():
             # The same ways to add files as the upload page's tabs.
             importing = data_import_ui.enabled()
-            labels = ["📁 Your files", "💻 Data on your computer"]
+            # A protein database comes from UniProt rather than from a PRIDE
+            # dataset, so its UniProt tab follows "Your files" and PRIDE is left out.
+            uniprot = bool(upload.get("uniprot"))
+            pride = importing and not uniprot
+            labels = ["📁 Your files"]
+            if uniprot:
+                labels.append("🔎 Import from UniProt proteome")
+            labels.append("💻 Data on your computer")
             if importing:
-                labels += ["☁️ Cloud data", "🧬 Import from PRIDE"]
-            if upload.get("uniprot"):
-                labels.append("🔎 UniProt proteome")
-            tabs = st.tabs(labels)
-            with tabs[0]:
+                labels.append("☁️ Cloud data")
+            if pride:
+                labels.append("🧬 Import from PRIDE")
+            tabs = dict(zip(labels, st.tabs(labels)))
+            tab_list = list(tabs.values())
+            with tab_list[0]:
                 # Takes the example files out once files of the user's own are in.
                 self._ensure_fallback(key, upload.get("fallback"))
                 options = self._input_file_options(key)
                 if not options:
                     st.info(
-                        "No files yet: add some from your computer"
-                        + (", from the cloud or from PRIDE." if importing else ".")
+                        "No files yet: add some "
+                        + ("from UniProt, " if uniprot else "")
+                        + "from your computer"
+                        + (", from the cloud or from PRIDE." if pride
+                           else " or from the cloud." if importing else ".")
                     )
                 else:
                     paths = {Path(o).name: o for o in options}
@@ -776,7 +797,7 @@ class StreamlitUI:
             # The upload widget fills self.upload_targets, so it is drawn
             # first and the import tabs route files by it.
             self.upload_targets = {}
-            with tabs[1]:
+            with tabs["💻 Data on your computer"]:
                 # Unwrapped from its fragment: adding files reruns the whole
                 # dialog, so "Your files" lists them at once.
                 StreamlitUI.upload_widget.__wrapped__(
@@ -784,16 +805,17 @@ class StreamlitUI:
                     **{k: v for k, v in upload.items() if k not in ("name", "uniprot")},
                 )
             if importing:
-                with tabs[2]:
+                with tabs["☁️ Cloud data"]:
                     data_import_ui.link_import_section(
                         self.workflow_dir, self.upload_targets, source=data_import_ui.LINK
                     )
-                with tabs[3]:
+            if pride:
+                with tabs["🧬 Import from PRIDE"]:
                     data_import_ui.link_import_section(
                         self.workflow_dir, self.upload_targets, source=data_import_ui.PRIDE
                     )
-            if upload.get("uniprot"):
-                with tabs[-1]:
+            if uniprot:
+                with tabs["🔎 Import from UniProt proteome"]:
                     # Downloads into this upload folder and selects the file.
                     self.uniprot_proteome_download(key, plain_name)
 
@@ -1085,6 +1107,20 @@ class StreamlitUI:
         for example in examples.values():
             if not Path(files_dir, example.name).exists():
                 shutil.copy(example, Path(files_dir, example.name))
+        self._fallback_folders(key, fallback)
+
+    def _fallback_folders(self, key: str, fallback) -> None:
+        """Put the example files of upload ``key`` in the folders a ``fallback``
+        dict names (file -> folder); files already in a folder stay there."""
+        if not isinstance(fallback, dict):
+            return
+        named = {Path(f).name: d for f, d in fallback.items() if d}
+        if not named:
+            return
+        folders = load_folders(self.workflow_dir, key)
+        missing = {n: d for n, d in named.items() if n not in folders}
+        if missing:
+            save_folders(self.workflow_dir, key, {**folders, **missing})
 
     def _select_input_file_impl(self, key, name, multiple, display_file_path, reactive, upload=None):
         """Internal implementation of select_input_file - contains all the widget logic."""
@@ -2418,10 +2454,11 @@ class StreamlitUI:
                 to that ``select_input_file`` so the table follows the selection.
             name (str, optional): The heading shown above the table.
             suggest (bool, optional): Also fill the condition and replicate of
-                files in no folder from the groups their names suggest
-                (``ctrl_R1``, ``ctrl_R2``, ``treated_R1`` ...). Files in a
-                folder (see ``upload_widget``) always take the folder as
-                their condition when they have none yet.
+                files from the groups their names suggest (``ctrl_R1``,
+                ``ctrl_R2``, ``treated_R1`` ...): files in no folder from all
+                names, files in a folder (see ``upload_widget``) from the
+                names in that folder. Without such groups a file in a folder
+                takes the folder as its condition when it has none yet.
         """
         files = st.session_state.get(
             f"{self.parameter_manager.param_prefix}{key}", self.params.get(key, [])
@@ -2761,15 +2798,25 @@ class StreamlitUI:
 
         # Display threads configuration for local mode only
         if not st.session_state.settings.get("online_deployment", False):
-            max_threads_config = st.session_state.settings.get("max_threads", {})
-            default_threads = max_threads_config.get("local", 4)
+            default_threads = local_thread_default(st.session_state.settings)
+            if not local_threads_pinned(st.session_state.settings):
+                default_help = (
+                    f"Default: all CPUs of this computer but one "
+                    f"({usable_cpu_count()} usable, so {default_threads})."
+                )
+            else:
+                default_help = f"Default: {default_threads}, set by this app."
             self.input_widget(
                 key="max_threads",
                 default=default_threads,
                 name="Threads",
                 widget_type="number",
                 min_value=1,
-                help="Maximum threads for parallel processing. Threads are distributed between parallel commands and per-tool thread allocation."
+                help=(
+                    "Maximum threads for parallel processing. Threads are "
+                    "distributed between parallel commands and per-tool thread "
+                    f"allocation. {default_help}"
+                ),
             )
 
         # Display preset buttons if presets are available for this workflow
@@ -3351,7 +3398,9 @@ Started: {status.get('started_at', 'N/A')}""")
             return cleaned_dict
 
         # Don't want file paths to be shown in summary for export
-        params = remove_full_paths(self.params)
+        params = remove_full_paths(
+            {k: v for k, v in self.params.items() if k != THREADS_USER_MARKER}
+        )
 
         summary_text = ""
         python = {}
