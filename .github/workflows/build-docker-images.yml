@@ -29,8 +29,20 @@ jobs:
         sudo apt-get clean
         df -h
     - uses: actions/checkout@v3
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@v3
     - name: Build the full Docker image
-      run: docker build . --file Dockerfile --tag streamlitapp:latest
+      # Built with buildx and not loaded into the runner's docker: exporting
+      # the full image into the local image store took the runner down
+      # ("received a shutdown signal") with 100+ GB of disk still free, and
+      # this check only needs the build to succeed. The template's
+      # build-image.yml builds the same Dockerfile with buildx too.
+      uses: docker/build-push-action@v5
+      with:
+        context: .
+        file: Dockerfile
+        push: false
+        tags: streamlitapp:latest
 
   build-simple-app:
 
