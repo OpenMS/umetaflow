@@ -8,6 +8,9 @@ dependencies:
   - mono==6.12.0.90
   - sirius-ms==5.8.6
   - pip: # dependencies only available through pip
+      # CPU-only torch (ms2query needs it through ms2deepscore): the default
+      # PyPI build pulls in the NVIDIA CUDA packages
+    - --extra-index-url https://download.pytorch.org/whl/cpu
       # streamlit dependencies
     - streamlit==1.42.0
     - streamlit-plotly-events==0.0.6
@@ -20,4 +23,4 @@ dependencies:
     - numpy==1.24.4
     - rdkit==2023.9.4
     - plotly==6.0.0
-    # torch comes from requirements.txt, which takes the CPU-only build
+    - torch==2.5.0
