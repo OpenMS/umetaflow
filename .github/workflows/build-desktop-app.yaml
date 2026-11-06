@@ -53,6 +53,10 @@ jobs:
     outputs:
       run: ${{ steps.decide.outputs.run }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: app.yaml
+          sparse-checkout-cone-mode: false
       - id: decide
         env:
           GH_TOKEN: ${{ github.token }}
@@ -85,6 +89,13 @@ jobs:
               fi
               ;;
           esac
+          # `deploy.desktop: []` in app.yaml: the app ships no desktop installers,
+          # so only a run started by hand builds them.
+          if [ "$run" = true ] && [ "$EVENT" != workflow_dispatch ] && [ -f app.yaml ] &&
+             [ "$(yq -o=json -I=0 '.deploy.desktop' app.yaml)" = "[]" ]; then
+            run=false
+            echo "deploy.desktop is empty in app.yaml: no desktop build"
+          fi
           echo "run=$run" >> "$GITHUB_OUTPUT"
           echo "desktop build: $run" >> "$GITHUB_STEP_SUMMARY"
 
@@ -175,6 +186,8 @@ jobs:
       run: |
         p=electron/payload
         cp -R src utils content docs assets example-data .streamlit app.py settings.json default-parameters.json presets.json parameter-names.json "$p/"
+        # The license agreement on first start and the About dialog show it.
+        for f in LICENSE LICENSE.md LICENSE.txt; do if [[ -f $f ]]; then cp "$f" "$p/"; fi; done
         # The local server only listens on loopback; the shell passes the address.
         grep -v '^address' "$p/.streamlit/config.toml" > config.tmp && mv config.tmp "$p/.streamlit/config.toml"
         # Read-only on macOS and Linux (see stage-python.sh), so compile now.
