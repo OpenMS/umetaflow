@@ -29,6 +29,33 @@ DEFAULTS = [
 ]
 
 
+def allow_ms2deepscore_model_types():
+    """Let torch's weights-only load read the MS2Deepscore model file.
+
+    From torch 2.6 on, ``torch.load`` only unpickles tensors and plain Python
+    types unless told otherwise. The MS2Deepscore model that MS2Query loads
+    also stores its settings, which hold numpy arrays. Allowing exactly those
+    numpy types keeps the check on for everything else, instead of loading
+    the file with ``weights_only=False``.
+    """
+    try:
+        import numpy as np
+        import torch
+    except ImportError:
+        return
+    add_safe_globals = getattr(torch.serialization, "add_safe_globals", None)
+    if add_safe_globals is None:  # torch before 2.4 loads without the check
+        return
+    multiarray = np.core.multiarray
+    add_safe_globals(
+        [multiarray._reconstruct, multiarray.scalar, np.ndarray, np.dtype]
+        + [
+            type(np.dtype(t))
+            for t in ("float64", "float32", "float16", "int64", "int32", "int16", "int8", "uint8", "bool")
+        ]
+    )
+
+
 def get_params():
     if len(sys.argv) > 1:
         with open(sys.argv[1], "r") as f:
@@ -105,6 +132,8 @@ if __name__ == "__main__":
         download_ms2query_libraries(
             ms2query_library_files_directory, params["ion_mode"], flag
         )
+
+    allow_ms2deepscore_model_types()
 
     # Create a MS2Library object
     ms2library = create_library_object_from_one_dir(ms2query_library_files_directory)

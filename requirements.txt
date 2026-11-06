@@ -11,14 +11,12 @@ psutil==7.2.2
 pyopenms==3.2.0
 pyopenms_viz==0.1.5
 openms-insight==0.3.1
-streamlit==1.51.0
+streamlit==1.54.0
 streamlit-js-eval==0.1.7
-# Streamlit pulls in tornado; 6.6 fixes the open security advisory (needs Python 3.11).
-tornado==6.6
 xlsxwriter
 # Same pin as the streamlit-template: pyarrow 26 needs NumPy 2 (numpy is pinned
 # to 1.24 above), and pyarrow 25 segfaults in st.data_editor once pyopenms is loaded.
-pyarrow==19.0.1
+pyarrow==23.0.1
 
 # Redis Queue dependencies (for online mode)
 redis>=5.0.0
@@ -29,10 +27,13 @@ streamlit-plotly-events==0.0.6
 pyteomics==4.7.5
 ms2query==1.5.3
 rdkit==2023.9.4
-# torch from the CPU index: the default Linux wheel pulls in several GB of
-# NVIDIA CUDA libraries, which the app never uses.
+# Needed by ms2deepscore (MS2Query). From 2.6 on, run_ms2query.py allowlists
+# the numpy types in its model file for torch.load's weights-only check.
+# The CPU build: the PyPI wheel for Linux pulls in about 4 GB of CUDA
+# libraries the app never uses, enough to fill a CI runner's disk. pip picks
+# 2.14.1+cpu from this index where it exists and PyPI's 2.14.1 elsewhere.
 --extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.5.0
+torch==2.14.1
 scikit-learn
 # Reads Bruker timsTOF .d folders (TDF) for the conversion to mzML
 # (src/python-tools/bruker_to_mzml.py). Open-source, no vendor library.
@@ -40,3 +41,10 @@ timsrust_pyo3==0.4.1
 
 # Reads app.yaml, the app spec (utils/app_spec.py)
 pyyaml>=6.0
+# Not imported directly; pinned at the releases with current security fixes.
+tornado==6.6
+requests==2.33.0
+urllib3==2.8.0
+pillow==12.3.0
+certifi==2026.10.23
+protobuf==6.33.5

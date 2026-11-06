@@ -1,0 +1,78 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../../base
+  # No namespace.yaml: the shared `openms` namespace belongs to the template's
+  # own deployment (docs/kubernetes-deployment.md).
+
+components:
+  - ../../components/memory-tier-low
+
+namePrefix: umetaflow-
+
+commonLabels:
+  app: umetaflow
+
+images:
+  - name: openms-streamlit
+    newName: ghcr.io/openms/umetaflow
+    # The current release. Argo CD Image Updater moves the running app to each
+    # new release (k8s/argocd/image-updater.yaml); the release-app skill keeps
+    # this tag current so a re-created Application starts from it.
+    newTag: v2.1.0-full
+
+# UmetaFlow's own values. k8s/base and k8s/components are the template's and
+# arrive through the template sync; everything this app sets for itself is a
+# patch here (docs/kubernetes-deployment.md, "App values belong in the overlay").
+patches:
+  # The workspace share (deploy.k8s.storage in app.yaml).
+  - target:
+      kind: PersistentVolumeClaim
+      name: workspaces-manila-pvc
+    patch: |
+      - op: replace
+        path: /spec/resources/requests/storage
+        value: 100Gi
+  - target:
+      kind: IngressRoute
+      name: streamlit-traefik
+    patch: |
+      - op: replace
+        path: /spec/routes/0/match
+        value: (Host(`umetaflow.webapps.openms.de`) || Host(`umetaflow.webapps.openms.org`)) && PathPrefix(`/`)
+      - op: replace
+        path: /spec/routes/0/services/0/name
+        value: umetaflow-streamlit
+      - op: replace
+        path: /spec/routes/1/match
+        value: (Host(`umetaflow.webapps.openms.de`) || Host(`umetaflow.webapps.openms.org`)) && PathPrefix(`/sync`)
+      - op: replace
+        path: /spec/routes/1/services/0/name
+        value: umetaflow-sync
+  - target:
+      kind: Deployment
+      name: streamlit
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/env/0/value
+        value: "redis://umetaflow-redis:6379/0"
+      # The results pages hold whole feature matrices in memory; the low
+      # tier's 2Gi limit is too tight for them.
+      - op: replace
+        path: /spec/template/spec/containers/0/resources/limits/memory
+        value: 4Gi
+  - target:
+      kind: Deployment
+      name: sync
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/env/0/value
+        value: "redis://umetaflow-redis:6379/0"
+  - target:
+      kind: Deployment
+      name: rq-worker
+    patch: |
+      - op: replace
+        path: /spec/template/spec/containers/0/env/0/value
+        value: "redis://umetaflow-redis:6379/0"

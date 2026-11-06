@@ -1,3 +1,6 @@
+[browser]
+gatherUsageStats = false
+
 [client]
 # Hides the "Deploy" button; the menu keeps only settings, print and about.
 toolbarMode = "minimal"
@@ -5,12 +8,16 @@ toolbarMode = "minimal"
 [global]
 developmentMode = false
 
+[secrets]
+# Kubernetes mounts the optional `streamlit-secrets` Secret at /app/admin-secrets/;
+# the default locations are kept so local `streamlit run` picks up ./.streamlit/secrets.toml.
+files = ["/app/admin-secrets/secrets.toml", "~/.streamlit/secrets.toml", ".streamlit/secrets.toml"]
+
 [server]
-port = 8501 # should be same as configured in deployment repo
 address = "0.0.0.0"
-enableCORS = false
-enableXsrfProtection = false
-fileWatcherType = "none"
+maxUploadSize =  200 #MB
+port = 8501 # should be same as configured in deployment repo
+
 
 [theme]
 # Theme settings shared by the light and dark theme go here (font, radius, ...).

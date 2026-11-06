@@ -77,6 +77,8 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from src.workflow import health  # noqa: E402
 
+RQ_WORKER_DEPLOYMENT = REPO_ROOT / "k8s" / "base" / "rq-worker-deployment.yaml"
+CLEANUP_CRONJOB = REPO_ROOT / "k8s" / "base" / "cleanup-cronjob.yaml"
 
 
 class _DeadRedis:
@@ -600,3 +602,292 @@ def test_an_unreachable_queue_is_not_proof_of_remote_workers(monkeypatch):
 
     monkeypatch.delenv("REDIS_URL", raising=False)
     assert health.queue_workers_are_remote() is False
+
+
+# ---------------------------------------------------------------------------
+# The manifests
+#
+# The probe is a shell command in YAML, so it is extracted and *run* rather
+# than grepped: a substring check for "readinessProbe" survives replacing the
+# storage check's `|| exit 1` with `|| true`, which reports Ready on a wedged
+# mount and is the entire failure the probe exists to catch.
+# ---------------------------------------------------------------------------
+def _readiness_probe_script() -> str:
+    """The shell body of rq-worker's readiness probe, dedented."""
+    manifest = RQ_WORKER_DEPLOYMENT.read_text(encoding="utf-8")
+    assert "readinessProbe:" in manifest, (
+        "rq-worker has no readiness probe, so a wedged mount is invisible: the "
+        "RQ parent keeps heartbeating while its work horse is blocked"
+    )
+    block = manifest[manifest.index("readinessProbe:"):]
+    marker = "- |\n"
+    assert marker in block, "the probe's command is not a literal block scalar"
+    lines = block[block.index(marker) + len(marker):].splitlines()
+    indent = len(lines[0]) - len(lines[0].lstrip())
+    body = []
+    for line in lines:
+        if line.strip() and (len(line) - len(line.lstrip())) < indent:
+            break
+        body.append(line[indent:])
+    return "\n".join(body).rstrip() + "\n"
+
+
+def _require_probe_prerequisites() -> str:
+    """The bash that can run the probe, or a skip."""
+    bash = _bash()
+    if bash is None:
+        pytest.skip("no bash to run the readiness probe with")
+    probe = subprocess.run(
+        [bash, "-c", "command -v timeout"], capture_output=True, text=True, check=False
+    )
+    if probe.returncode != 0 or not probe.stdout.strip():
+        pytest.skip("no `timeout` for the probe to bound itself with")
+    return bash
+
+
+def _bash():
+    found = shutil.which("bash")
+    if found:
+        return found
+    for candidate in (
+        Path("C:/Program Files/Git/bin/bash.exe"),
+        Path("C:/Program Files/Git/usr/bin/bash.exe"),
+    ):
+        if candidate.exists():
+            return str(candidate)
+    return None
+
+
+def _posix(path) -> str:
+    text = Path(path).as_posix()
+    if os.name == "nt" and len(text) > 1 and text[1] == ":":
+        text = "/" + text[0].lower() + text[2:]
+    return text
+
+
+def _run_readiness_probe(workspaces_dir) -> subprocess.CompletedProcess:
+    """
+    Run the manifest's probe command, with only the container's interpreter
+    path swapped for this one. Everything else - the `timeout`, the module it
+    invokes, the exit status handling - is the shipped text.
+    """
+    bash = _require_probe_prerequisites()
+    script = _readiness_probe_script()
+    script, count = re.subn(
+        r"(?m)^py=.*$", "py=" + _posix(sys.executable), script, count=1
+    )
+    assert count == 1, (
+        "the probe no longer names its interpreter on a `py=` line; update "
+        f"this substitution:\n{script}"
+    )
+    return subprocess.run(
+        [bash, "-c", script],
+        cwd=str(REPO_ROOT),
+        capture_output=True,
+        text=True,
+        env=dict(
+            os.environ,
+            PYTHONPATH=str(REPO_ROOT),
+            WORKSPACES_DIR=str(workspaces_dir),
+            # Unreachable on purpose: the probe's verdict is about storage, and
+            # a dead Redis must not change it in either direction.
+            REDIS_URL="redis://127.0.0.1:1/0",
+            NODE_NAME="node-a",
+        ),
+        timeout=120,
+    )
+
+
+def test_readiness_probe_passes_on_a_volume_that_accepts_a_write(tmp_path):
+    result = _run_readiness_probe(tmp_path)
+
+    assert result.returncode == 0, (
+        f"the probe failed on a healthy volume.\nstdout: {result.stdout}\n"
+        f"stderr: {result.stderr}"
+    )
+    assert (tmp_path / health.STORAGE_SENTINEL_NAME).exists(), (
+        "the probe did not write the sentinel; `stat` alone can be answered "
+        "from the client's attribute cache while the server is gone"
+    )
+
+
+def test_readiness_probe_fails_when_the_volume_rejects_a_write(tmp_path):
+    """
+    The mutation that matters: replacing the storage check's `|| exit 1` with
+    `|| true` leaves every assertion about the probe's *shape* green while the
+    probe reports Ready on a wedged mount and publishes a heartbeat with it.
+    """
+    result = _run_readiness_probe(tmp_path / "not" / "a" / "mount")
+
+    assert result.returncode != 0, (
+        "the probe reported Ready for a volume that would not accept a write.\n"
+        f"stdout: {result.stdout}\nstderr: {result.stderr}"
+    )
+
+
+def test_readiness_probe_has_no_escape_hatch():
+    """
+    Nothing in the probe may swallow a failure. Kept alongside the behavioural
+    tests above because `|| true` is how this gets broken - it looks like
+    defensive shell and it silently inverts the verdict.
+    """
+    script = _readiness_probe_script()
+
+    assert "src.workflow.health" in script, (
+        "the probe must run the module that owns the sentinel name and the "
+        f"ordering, not a second copy of the logic in YAML:\n{script}"
+    )
+    assert "--probe" in script, f"the probe must run `--probe`:\n{script}"
+    assert "|| true" not in script, (
+        "a `|| true` in the readiness probe reports Ready on a wedged mount, "
+        f"which is the whole failure it exists to catch:\n{script}"
+    )
+    assert "exit 0" not in script, (
+        "an unconditional `exit 0` has the same effect as `|| true`:\n" + script
+    )
+
+
+def test_readiness_probe_uses_the_containers_own_interpreter():
+    """
+    The probe names an interpreter path outright instead of activating the
+    environment, because `conda activate` costs a few hundred milliseconds of
+    shell hooks on every probe. That buys a hardcoded path, which drifts
+    silently: rename the env or move the conda root and every probe fails with
+    "No such file or directory", the workers go NotReady, and the sidebar goes
+    red - all for a rename nothing pointed at this file.
+    """
+    manifest = RQ_WORKER_DEPLOYMENT.read_text(encoding="utf-8")
+
+    activate = re.search(r"source\s+(\S+)/bin/activate\s+(\S+)", manifest)
+    assert activate, (
+        "the rq-worker container no longer activates a conda environment; the "
+        "probe's interpreter path has nothing left to agree with"
+    )
+    conda_root, environment = activate.group(1), activate.group(2)
+
+    interpreter = re.search(r"(?m)^py=(\S+)$", _readiness_probe_script())
+    assert interpreter, "the probe does not name its interpreter on a `py=` line"
+    assert interpreter.group(1) == f"{conda_root}/envs/{environment}/bin/python", (
+        f"the probe runs {interpreter.group(1)}, but the container itself runs "
+        f"in {environment} under {conda_root}"
+    )
+
+
+def test_worker_gets_its_node_name_from_the_downward_api():
+    """
+    Without `NODE_NAME`, `current_node_name()` falls back to the hostname -
+    the *pod* name in Kubernetes, which changes on every restart. The
+    heartbeat would then be keyed per pod, the registry would fill with dead
+    pod names, and the per node visibility the design turns on would be gone.
+    """
+    manifest = RQ_WORKER_DEPLOYMENT.read_text(encoding="utf-8")
+    downward = re.search(
+        r"-\s+name:\s+NODE_NAME\s+valueFrom:\s+fieldRef:\s+fieldPath:\s+(\S+)",
+        manifest,
+    )
+    assert downward, (
+        "rq-worker does not take NODE_NAME from the Downward API:\n" + manifest
+    )
+    assert downward.group(1) == "spec.nodeName", (
+        f"NODE_NAME reads {downward.group(1)}, not the node's name"
+    )
+
+
+def test_worker_has_no_liveness_probe():
+    manifest = RQ_WORKER_DEPLOYMENT.read_text(encoding="utf-8")
+
+    assert "livenessProbe" not in manifest, (
+        "never a liveness probe on rq-worker: it would kill in-flight TOPP jobs, "
+        "and restarting cannot fix NFS"
+    )
+
+
+def test_probe_timing_outlasts_the_nfs_grace_period():
+    """
+    A Ganesha restart imposes a ~90s NFSv4 grace period during which all I/O
+    blocks. Probe timing has to outlast it, or every routine restart flaps the
+    worker - and the sidebar must go red *before* the worker is marked
+    NotReady, so degradation is visible before it is fatal.
+    """
+    manifest = RQ_WORKER_DEPLOYMENT.read_text(encoding="utf-8")
+
+    def _value(field: str) -> int:
+        match = re.search(rf"(?m)^\s+{field}:\s+(\d+)\s*$", manifest)
+        assert match, f"the readiness probe declares no {field}"
+        return int(match.group(1))
+
+    period = _value("periodSeconds")
+    threshold = _value("failureThreshold")
+    kubelet_timeout = _value("timeoutSeconds")
+
+    to_not_ready = (threshold - 1) * period + kubelet_timeout
+    assert to_not_ready > 90, (
+        f"{to_not_ready}s of failure before NotReady does not outlast the ~90s "
+        "NFSv4 grace period; every Ganesha restart would flap the worker"
+    )
+    assert health.STORAGE_HEARTBEAT_TTL >= 2 * period, (
+        f"a heartbeat TTL of {health.STORAGE_HEARTBEAT_TTL}s against a "
+        f"{period}s probe period turns the indicator red on a single slow "
+        "probe, while the mount is healthy"
+    )
+    assert health.STORAGE_HEARTBEAT_TTL < to_not_ready, (
+        "the indicator must go red before the worker is marked NotReady: "
+        "degradation should be visible before it is fatal"
+    )
+
+    # A wedged node re-registers once per period, a probe at most
+    # kubelet_timeout late; the window must cover that, or a wedged node is
+    # dismissed as departed. And a departed node's registration must be past
+    # the window by the time its heartbeat expires, or it shows as degraded.
+    assert health.STORAGE_NODE_PROBING_WINDOW > period + kubelet_timeout, (
+        "a node whose mount has wedged would drop out of the indicator between "
+        "two of its registrations"
+    )
+    assert health.STORAGE_NODE_PROBING_WINDOW < health.STORAGE_HEARTBEAT_TTL, (
+        "a worker that moved away would show its old node as degraded until "
+        "the registration expires"
+    )
+
+    inner = re.search(r"timeout\s+-k\s+\d+\s+(\d+)", _readiness_probe_script())
+    assert inner, "the probe does not bound itself with `timeout`"
+    assert int(inner.group(1)) < kubelet_timeout, (
+        f"the probe's own bound ({inner.group(1)}s) is not inside kubelet's "
+        f"({kubelet_timeout}s), so a slow-but-alive mount never produces a "
+        "clean exit status"
+    )
+
+
+def test_cleanup_cronjob_cannot_wedge_forever():
+    """
+    `concurrencyPolicy: Forbid` means one Active Job suppresses every later
+    schedule, so a run hung on the shared mount silently ends nightly cleanup
+    forever.
+
+    Both bounds are required. `activeDeadlineSeconds` is a control-plane bound
+    applied to a syscall-level hang: a pod in D-state cannot terminate, and on
+    recent Kubernetes the Job's terminal Failed condition is only added once
+    every pod has terminated, so Forbid can still suppress the next schedule.
+    The in-container `timeout` closes the reachable-but-slow cases without
+    depending on the cluster version.
+    """
+    manifest = CLEANUP_CRONJOB.read_text(encoding="utf-8")
+
+    assert "concurrencyPolicy: Forbid" in manifest, (
+        "this test is about what Forbid does to a hung run; if the policy "
+        "changed, revisit both bounds below"
+    )
+    deadline = re.search(r"(?m)^\s+activeDeadlineSeconds:\s+(\d+)\s*$", manifest)
+    assert deadline, (
+        "the cleanup CronJob has no activeDeadlineSeconds, so one run wedged "
+        "on the workspaces mount blocks every subsequent night"
+    )
+
+    inner = re.search(r"timeout\s+-k\s+\d+\s+(\d+)\s", manifest)
+    assert inner, (
+        "the cleanup command is not wrapped in `timeout`; activeDeadlineSeconds "
+        "alone leaves the container itself unbounded"
+    )
+    assert int(inner.group(1)) < int(deadline.group(1)), (
+        f"the in-container bound ({inner.group(1)}s) must fire before the Job "
+        f"deadline ({deadline.group(1)}s), or it never fires at all"
+    )

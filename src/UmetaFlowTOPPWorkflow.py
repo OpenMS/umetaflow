@@ -62,8 +62,12 @@ class Workflow(WorkflowManager):
         if config_file.exists():
             with open(config_file, 'r') as f:
                 config = json.load(f)
-                if 'sirius_path' in config:
-                    return config['sirius_path']
+            # The UI and the worker can run on different images (an ARM
+            # worker ships without SIRIUS), so a cached path counts only
+            # where it resolves.
+            cached = config.get('sirius_path', '')
+            if cached and shutil.which(cached) is not None:
+                return cached
 
         # Discover SIRIUS path
         sirius_path = ''
@@ -803,6 +807,17 @@ class Workflow(WorkflowManager):
             self.logger.log("Running UmetaFlow with expert mode configuration.")
         else:
             self.params = self.format_simple_params()
+
+        if any(
+            self.params.get(key)
+            for key in ("run-sirius", "run-fingerid", "run-canopus")
+        ) and not self._get_sirius_path():
+            self.logger.log(
+                "ERROR: SIRIUS annotation was requested, but SIRIUS is not installed "
+                "where this workflow runs. Turn off the SIRIUS annotation options "
+                "(exporting files for SIRIUS still works) or run on a machine with SIRIUS."
+            )
+            return False
 
         # Get mzML files
         df_path = Path(self.workflow_dir, '..', "mzML-files.tsv")
