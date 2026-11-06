@@ -18,6 +18,11 @@
       "license": "MIT",
       "reason": "PyPI metadata says UNKNOWN, but the wheel ships an MIT LICENSE file (Copyright (c) 2022-2024 Alireza Ghasemi).",
       "attribution": "About dialog, Python packages (the wheel's LICENSE file)."
+    },
+    "streamlit-plotly-events": {
+      "license": "MIT",
+      "reason": "PyPI metadata names no license, but the wheel ships an MIT LICENSE file (dist-info/LICENSE); the bundled frontend keeps its MIT notices in *.LICENSE.txt.",
+      "attribution": "About dialog, Python packages (the wheel's LICENSE file)."
     }
   }
 }
