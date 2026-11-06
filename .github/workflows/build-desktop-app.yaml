@@ -39,7 +39,8 @@ concurrency:
 env:
   # Name of the app and its installers
   APP_NAME: UmetaFlow
-  # Define needed TOPP tools here
+  # Define needed TOPP tools here. FileConverter converts Thermo .raw input
+  # (CommandExecutor.convert_to_mzml) with share/OpenMS/THIRDPARTY/ThermoRawFileParser.
   TOPP_TOOLS: "HighResPrecursorMassCorrector MapRTTransformer FileFilter FileConverter FeatureFinderMetabo MapAlignerPoseClustering MetaboliteAdductDecharger FeatureFinderMetaboIdent FeatureLinkerUnlabeledKD IDMapper SiriusExport GNPSExport MetaboliteSpectralMatcher"
 
 jobs:
@@ -173,12 +174,12 @@ jobs:
     - name: Copy the app into the payload
       run: |
         p=electron/payload
-        cp -R src content assets example-data .streamlit app.py settings.json default-parameters.json presets.json parameter-names.json "$p/"
+        cp -R src utils content docs assets example-data .streamlit app.py settings.json default-parameters.json presets.json parameter-names.json "$p/"
         # The local server only listens on loopback; the shell passes the address.
         grep -v '^address' "$p/.streamlit/config.toml" > config.tmp && mv config.tmp "$p/.streamlit/config.toml"
         # Read-only on macOS and Linux (see stage-python.sh), so compile now.
         if [[ $RUNNER_OS != Windows ]]; then
-          "$p/python-$PYTHON_VERSION/bin/python3" -m compileall -q --invalidation-mode unchecked-hash "$p/src"
+          "$p/python-$PYTHON_VERSION/bin/python3" -m compileall -q --invalidation-mode unchecked-hash "$p/src" "$p/utils"
         fi
         du -sh "$p"
 

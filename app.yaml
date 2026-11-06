@@ -13,6 +13,7 @@ app:
     export and MS2 annotation.'
   repository: OpenMS/umetaflow
   domain: metabolomics
+  image: ghcr.io/openms/umetaflow
 inputs:
   mzML-files:
     types:
@@ -99,8 +100,17 @@ pages:
 - content/statistics.py
 deploy:
   k8s:
-    enabled: false
+    enabled: true
+    hosts:
+    - umetaflow.webapps.openms.de
+    - umetaflow.webapps.openms.org
+    storage: 100Gi
+    worker_tier: low
   docker_compose: true
+  # No simple ARM image: PyPI has no linux/aarch64 wheel of pyopenms 3.2.0, the
+  # last release that allows numpy<1.25 (MS2Query). The full ARM image builds
+  # pyOpenMS from source and has it.
+  images: [full-amd64, simple-amd64, full-arm64]
   desktop:
   - windows
   online_deployment: false
@@ -111,33 +121,36 @@ sync:
   - settings.json
   - default-parameters.json
   - presets.json
-  - parameter-names.json
   - README.md
   - content/*
   - src/python-tools/*
   - example-data/*
   - assets/*
   - k8s/overlays/*
+  - k8s/argocd/*
+  - CLAUDE.app.md
+  - conda-requirements.txt
+  # UmetaFlow's own code
   - src/UmetaFlowTOPPWorkflow.py
   - src/dataframes.py
   - src/eic.py
+  - src/feature_explorer.py
   - src/masscalculator.py
   - src/metabolomicsresults.py
+  - src/ms2_viewer.py
   - src/plotting/*
   - src/stats.py
   - src/view.py
   - src/fileupload.py
-  - .streamlit/config.toml
-  - Dockerfile
-  - Dockerfile_simple
   - docker-compose.yml
-  - clean-up-workspaces.py
   - .github/workflows/build-desktop-app.yaml
   - .github/workflows/workflow-tests.yml
   - test.py
-  - .github/workflows/build-and-test.yml
-  - .github/scripts/ci-assertions.sh
-  - .github/kind-config.yaml
+  - test_gui.py
+  - tests/e2e/*
+  - tests/test_feature_explorer.py
+  - tests/test_ms2_viewer.py
+  # Template example code and docs UmetaFlow removed
   - src/Workflow.py
   - src/simpleworkflow.py
   - src/mzmlfileworkflow.py
@@ -145,10 +158,8 @@ sync:
   - src/peptide_mz_calculator.py
   - utils/digest.py
   - utils/fasta.py
-  - test_gui.py
   - docs/toppframework.py
   - docs/user_guide.md
-  - docs/build_app.md
   - docs/installation.md
   - docs/win_exe_with_embed_py.md
   - docs/win_exe_with_pyinstaller.md
@@ -159,5 +170,3 @@ sync:
   - tests/test_tasks.py
   - tests/test_workspace_sync.py
   - tests/test_workspace_selector.py
-  - CLAUDE.app.md
-  - conda-requirements.txt

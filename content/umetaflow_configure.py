@@ -11,7 +11,10 @@ wf = Workflow(st.session_state["workspace"])
 expert_mode = wf.params.get("expert_mode", False)
 
 def update_expert_mode():
-    wf.params["expert_mode"] = st.session_state["umetaflow-expert-mode"]
+    # save_parameters() stores session-state keys under param_prefix, not wf.params
+    st.session_state[wf.parameter_manager.param_prefix + "expert_mode"] = (
+        st.session_state["umetaflow-expert-mode"]
+    )
     wf.parameter_manager.save_parameters()
 
 st.toggle(

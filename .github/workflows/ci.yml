@@ -34,5 +34,5 @@ jobs:
         pip install pytest fakeredis
     - name: Test
       run: |
-        python -m pytest tests/
+        python -m pytest test_gui.py tests/
 
