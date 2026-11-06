@@ -54,10 +54,17 @@ def test_launch(launch):
 @pytest.mark.parametrize("launch", ["content/file_upload.py"], indirect=True)
 def test_file_upload_load_example(launch):
     launch.run(timeout=60)
-    for i in launch.tabs:
-        if i.label == "Example Data":
-            i.button[0].click().run(timeout=60)
-            assert not launch.exception
+    mzML_dir = Path(launch.session_state.workspace, "mzML-files")
+    for f in mzML_dir.glob("*.mzML"):
+        f.unlink()
+
+    example_tab = next(t for t in launch.tabs if t.label == "Example Data")
+    example_tab.button[0].click().run(timeout=60)
+    assert not launch.exception
+
+    examples = sorted(p.name for p in Path("example-data", "mzML").glob("*.mzML"))
+    assert examples
+    assert all(Path(mzML_dir, name).is_file() for name in examples)
 
 
 @pytest.mark.parametrize(

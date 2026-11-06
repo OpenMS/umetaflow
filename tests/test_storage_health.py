@@ -835,6 +835,19 @@ def test_probe_timing_outlasts_the_nfs_grace_period():
         "degradation should be visible before it is fatal"
     )
 
+    # A wedged node re-registers once per period, a probe at most
+    # kubelet_timeout late; the window must cover that, or a wedged node is
+    # dismissed as departed. And a departed node's registration must be past
+    # the window by the time its heartbeat expires, or it shows as degraded.
+    assert health.STORAGE_NODE_PROBING_WINDOW > period + kubelet_timeout, (
+        "a node whose mount has wedged would drop out of the indicator between "
+        "two of its registrations"
+    )
+    assert health.STORAGE_NODE_PROBING_WINDOW < health.STORAGE_HEARTBEAT_TTL, (
+        "a worker that moved away would show its old node as degraded until "
+        "the registration expires"
+    )
+
     inner = re.search(r"timeout\s+-k\s+\d+\s+(\d+)", _readiness_probe_script())
     assert inner, "the probe does not bound itself with `timeout`"
     assert int(inner.group(1)) < kubelet_timeout, (
