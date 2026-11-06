@@ -114,6 +114,15 @@ deploy:
   desktop:
   - windows
   online_deployment: false
+
+# Optional CI checks, all on by default. An app with few CI minutes turns off
+# what it does not need (and sets deploy.desktop: [] to skip desktop builds).
+# ci:
+#   kind_tests: false             # kind deployments behind nginx and Traefik
+#   apptainer: false              # Apptainer test and SIF
+#   example_workflow_tests: false # workflow-tests.yml (template example)
+#   openms_release: false         # PRs for new OpenMS releases
+
 sync:
   app_owned:
   - app.yaml
@@ -170,3 +179,5 @@ sync:
   - tests/test_tasks.py
   - tests/test_workspace_sync.py
   - tests/test_workspace_selector.py
+  - contributors.json
+  - dependency-licenses.json
