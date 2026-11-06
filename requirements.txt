@@ -33,7 +33,7 @@ rdkit==2023.9.4
 # libraries the app never uses, enough to fill a CI runner's disk. pip picks
 # 2.14.1+cpu from this index where it exists and PyPI's 2.14.1 elsewhere.
 --extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.14.1
+torch==2.15.0+cpu
 scikit-learn
 # Reads Bruker timsTOF .d folders (TDF) for the conversion to mzML
 # (src/python-tools/bruker_to_mzml.py). Open-source, no vendor library.
