@@ -4,34 +4,23 @@ page_setup() hands the selectbox value to openms_insight.set_image_format().
 The template does not depend on openms-insight, so the package is replaced
 here by a fake module in ``sys.modules`` (restored by monkeypatch after each
 test), and the call must be a no-op when the package is missing or is a
-release without set_image_format. It runs unchanged in every app: the page
-is page_setup() alone, and the expected format is the app's default.
+release without set_image_format.
 """
 
 import json
 import sys
 import types
-from pathlib import Path
 
 import pytest
 from streamlit.testing.v1 import AppTest
 
-ROOT = Path(__file__).resolve().parents[1]
-
-
-# The page is page_setup() alone: an app's own pages may import openms_insight,
-# directly or through their modules, and the fake below cannot serve them.
-PAGE = "from src.common.common import page_setup\npage_setup()\n"
-
-
-DEFAULT = json.loads((ROOT / "default-parameters.json").read_text(encoding="utf-8"))["image-format"]
-OTHER = "png" if DEFAULT != "png" else "svg"
+PAGE = "content/file_upload.py"
 
 
 @pytest.fixture
 def app(tmp_path):
-    at = AppTest.from_string(PAGE)
-    with open(ROOT / "settings.json", "r", encoding="utf-8") as f:
+    at = AppTest.from_file(PAGE)
+    with open("settings.json", "r", encoding="utf-8") as f:
         at.session_state.settings = json.load(f)
     at.session_state.settings["test"] = True
     # Keep the workspace this test writes out of the real workspaces folder.
@@ -48,11 +37,11 @@ def test_sidebar_format_reaches_insight(app, monkeypatch):
 
     app.run(timeout=60)
     assert not app.exception
-    assert calls and calls[-1] == app.session_state["image-format"] == DEFAULT
+    assert calls and calls[-1] == app.session_state["image-format"] == "svg"
 
-    app.selectbox(key="image-format").set_value(OTHER).run(timeout=60)
+    app.selectbox(key="image-format").set_value("png").run(timeout=60)
     assert not app.exception
-    assert calls[-1] == OTHER
+    assert calls[-1] == "png"
 
 
 def test_insight_release_without_setting(app, monkeypatch):
@@ -79,7 +68,7 @@ def test_options_follow_insight_list(app, monkeypatch):
     assert not app.exception
     box = app.selectbox(key="image-format")
     assert box.options == ["png", "svg"]
-    assert box.value == DEFAULT
+    assert box.value == "svg"
 
 
 def test_saved_format_insight_dropped(app, monkeypatch):
