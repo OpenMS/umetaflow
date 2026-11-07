@@ -26,6 +26,8 @@ from src.common.common import (
     tk_file_dialog,
 )
 from src.workflow._log_status import classify_log_outcome
+from src.workflow.report_ui import report_buttons
+from src.workflow.RunManager import FOLLOW_UP_KEY
 from src.workflow.progress import (
     DONE,
     FAILED,
@@ -195,6 +197,11 @@ def editor_table(state, editor_key: str, table, fits=None):
         kept = table() if callable(table) else table
         state[kept_key] = kept
     return kept
+
+
+def latest_results_key(workflow_dir) -> str:
+    """Session-state flag the Run page's results button sets for the results page."""
+    return f"{Path(workflow_dir).name}-show-latest-results"
 
 
 class StreamlitUI:
@@ -1130,6 +1137,26 @@ class StreamlitUI:
             self._ensure_fallback(key, upload.get("fallback"))
         options = self._input_file_options(key)
         widget = f"{self.parameter_manager.param_prefix}{key}"
+        done = self._experiment_files(key)
+        if done:
+            # Settings that add files to an experiment: its processed files are
+            # shown apart, and only the files to add can be picked
+            processed = {Path(f).name for f in done}
+            options = [o for o in options if Path(o).name not in processed]
+            current = st.session_state.get(widget)
+            if isinstance(current, list):
+                st.session_state[widget] = [f for f in current if f in options]
+            name = "Files to add"
+            names = list(dict.fromkeys(Path(f).name for f in done))
+            st.multiselect(
+                "In the experiment already",
+                names,
+                default=names,
+                disabled=True,
+                key=f"_experiment-files-{widget}",
+                help="Processed already. The results show them together with the files "
+                "added here, as one experiment.",
+            )
         pending = f"_pending-{widget}"
         if pending in st.session_state:  # chosen in the Browse pop-out
             value = st.session_state.pop(pending)
@@ -1186,6 +1213,14 @@ class StreamlitUI:
             "folders and add new ones.",
         ):
             self._browse_input_files(key, name, multiple, upload)
+
+    def _experiment_files(self, key: str) -> List[str]:
+        """The files the experiment holds already, while the settings add files
+        to it (``WorkflowManager.follow_up(..., add_files=key)``), else none."""
+        info = self.parameter_manager.get_parameters_from_json().get(FOLLOW_UP_KEY)
+        if not isinstance(info, dict) or not info.get("adds_to") or info.get("files_key") != key:
+            return []
+        return [str(f) for f in info.get("files") or []]
 
     def _select_by_folder(self, key: str, options: List[str]) -> None:
         """Buttons that select the files of one folder (see ``upload_widget``)."""
@@ -2790,11 +2825,41 @@ class StreamlitUI:
             if c1.button("⬇️ Download files", use_container_width=True):
                 self.zip_and_download_files(Path(self.workflow_dir, "input-files"))
 
-    def parameter_section(self, custom_parameter_function) -> None:
+    def follow_up_notice(self) -> None:
+        """Say which run the settings come from, after ``WorkflowManager.follow_up``.
+
+        Drawn once per page, at the top of the parameter section; a page that
+        draws its own box above that section calls it first.
+        """
+        if getattr(self, "_follow_up_drawn", False):
+            return
+        self._follow_up_drawn = True
+        info = self.parameter_manager.get_parameters_from_json().get(FOLLOW_UP_KEY)
+        if not isinstance(info, dict):
+            return
+        text = f"These are the settings of the run **{info.get('name', info.get('run', ''))}**"
+        text += f", {info['note']}." if info.get("note") else "."
+        if info.get("adds_to"):
+            done = info.get("files") or []
+            text += (f" Pick only the files to add: the {len(done)} "
+                     f"{'file' if len(done) == 1 else 'files'} of that run "
+                     f"{'is' if len(done) == 1 else 'are'} processed already, and the results "
+                     "show them together with the new ones as one experiment.")
+        text += " Check them, then start below."
+        with st.container(border=True, horizontal=True, vertical_alignment="center"):
+            st.markdown(f":material/history: {text}", width="stretch")
+            if st.button("Dismiss", key=f"{self.workflow_dir.name}-follow-up-dismiss"):
+                params = self.parameter_manager.get_parameters_from_json()
+                params.pop(FOLLOW_UP_KEY, None)
+                self.parameter_manager.write_parameters(params)
+                st.rerun()
+
+    def parameter_section(self, custom_parameter_function, after_parameters=None) -> None:
         # No "Show advanced parameters" toggle: each TOPP tool's "All N
         # parameters" dialog reaches the advanced ones, and a python tool's
         # sit in an expander. An app can still set this to True itself.
         st.session_state.setdefault("advanced", False)
+        self.follow_up_notice()
 
         # Display threads configuration for local mode only
         if not st.session_state.settings.get("online_deployment", False):
@@ -2824,6 +2889,8 @@ class StreamlitUI:
         self.user_presets()
 
         custom_parameter_function()
+        if after_parameters is not None:
+            after_parameters()
 
         # File Import / Export section       
         st.markdown("---")
@@ -2870,8 +2937,17 @@ class StreamlitUI:
                 # encoding="utf-8" explicitly: the payload is decoded as utf-8
                 # just above, and writing it back in the platform codepage
                 # produced a params.json that no later utf-8 read could decode.
+                text = up.read().decode("utf-8")
+                try:
+                    # An export made while a follow-up was prepared names the run
+                    # it followed: imported settings start no follow-up
+                    imported = json.loads(text)
+                    if isinstance(imported, dict) and imported.pop(FOLLOW_UP_KEY, None) is not None:
+                        text = json.dumps(imported, indent=4)
+                except ValueError:
+                    pass
                 with open(self.parameter_manager.params_file, "w", encoding="utf-8") as f:
-                    f.write(up.read().decode("utf-8"))
+                    f.write(text)
                 self.parameter_manager.clear_parameter_session_state()
                 st.toast("Parameters imported")
                 st.rerun()
@@ -2880,8 +2956,19 @@ class StreamlitUI:
         self,
         start_workflow_function,
         get_status_function=None,
-        stop_workflow_function=None
+        stop_workflow_function=None,
+        autostart: bool = False,
+        results_page=None,
+        results_label: str = "Open results",
+        on_open_results=None,
     ) -> None:
+        """Start/Stop, progress and log of the workflow.
+
+        ``autostart`` starts the workflow on this render unless one is running
+        (the Run button of the configure page). ``results_page`` is linked
+        below the success message of a finished run; ``on_open_results`` runs
+        before that button switches to it.
+        """
         with st.expander("**Summary**"):
             st.markdown(self.export_parameters_markdown())
 
@@ -2923,6 +3010,13 @@ class StreamlitUI:
         # Show queue status if available (online mode)
         if status.get("job_id"):
             self._show_queue_status(status)
+
+        # Started from the configure page's Run button
+        if autostart and not is_running:
+            start_workflow_function()
+            with st.spinner("**Workflow starting...**"):
+                time.sleep(1)
+                st.rerun()
 
         # Control buttons
         if is_running:
@@ -2981,17 +3075,35 @@ class StreamlitUI:
                 outcome = classify_log_outcome(content)
                 if outcome == "finished":
                     st.success("**Workflow completed successfully.**")
+                    if results_page is not None:
+                        self._results_link(results_page, results_label, on_open_results)
                 elif outcome == "cancelled":
                     st.warning("**Workflow was cancelled.**")
                 else:
                     st.error("**Errors occurred, check log file.**")
                 self._show_run_summary(show_failures=outcome != "finished")
+                report_buttons(self.workflow_dir, key=f"{self.workflow_dir.name}-run-report")
                 # Apply line limit to static display
                 if log_lines_count == "all":
                     display_lines = lines
                 else:
                     display_lines = lines[-st.session_state.log_lines_count:]
                 st.code("".join(display_lines), language="neon", line_numbers=False)
+
+    def _results_link(self, results_page, label: str, on_open=None) -> None:
+        """A primary button that opens the results page of a finished run.
+
+        It leaves ``st.session_state[latest_results_key(workflow_dir)]`` set, so a
+        results page that picks among the results itself (no run folders) can
+        pop it and show the newest one; ``on_open`` (a multi-run workflow
+        selects its newest finished run) runs before the page switch.
+        """
+        if st.button(label, type="primary", icon=":material/arrow_forward:",
+                     key="workflow-open-results"):
+            st.session_state[latest_results_key(self.workflow_dir)] = True
+            if on_open is not None:
+                on_open()
+            st.switch_page(results_page)
 
     def _show_run_progress(self) -> None:
         """Progress of the running workflow: per sample when the run records
@@ -3408,7 +3520,7 @@ Started: {status.get('started_at', 'N/A')}""")
         general = {}
 
         for k, v in params.items():
-            if k == "_defaults":
+            if k.startswith("_"):  # _defaults, _flag_params, _follow_up: bookkeeping
                 continue
             if isinstance(v, dict):
                 topp[k] = v

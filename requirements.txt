@@ -48,3 +48,6 @@ urllib3==2.8.0
 pillow==12.3.0
 certifi==2026.10.23
 protobuf==6.33.5
+
+# Writes the processing report of a run as PDF (src/workflow/processing_report.py)
+reportlab>=4.0
