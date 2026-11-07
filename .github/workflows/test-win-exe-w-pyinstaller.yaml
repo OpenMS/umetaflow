@@ -78,9 +78,11 @@ jobs:
         cp -r src dist/src
         cp -r example-data dist/example-data
         cp -r assets dist/assets
+        cp -r static dist/static
         cp app.py dist/
         cp presets.json dist/
         cp parameter-names.json dist/
+        cp contributors.json dist/
 
     - name: Modify .spec file
       shell: bash

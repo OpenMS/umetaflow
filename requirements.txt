@@ -31,9 +31,10 @@ rdkit==2023.9.4
 # the numpy types in its model file for torch.load's weights-only check.
 # The CPU build: the PyPI wheel for Linux pulls in about 4 GB of CUDA
 # libraries the app never uses, enough to fill a CI runner's disk. pip picks
-# 2.14.1+cpu from this index where it exists and PyPI's 2.14.1 elsewhere.
+# 2.15.0+cpu from this index where it exists and PyPI's 2.15.0 elsewhere
+# (macOS); a pin with "+cpu" has no macOS wheel.
 --extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.15.0+cpu
+torch==2.15.0
 scikit-learn
 # Reads Bruker timsTOF .d folders (TDF) for the conversion to mzML
 # (src/python-tools/bruker_to_mzml.py). Open-source, no vendor library.
@@ -48,3 +49,6 @@ urllib3==2.8.0
 pillow==12.3.0
 certifi==2026.10.23
 protobuf==6.33.5
+
+# Writes the processing report of a run as PDF (src/workflow/processing_report.py)
+reportlab>=4.0
