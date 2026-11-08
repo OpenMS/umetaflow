@@ -104,7 +104,6 @@ deploy:
     hosts:
     - umetaflow.webapps.openms.de
     - umetaflow.webapps.openms.org
-    storage: 100Gi
     worker_tier: low
   docker_compose: true
   # No simple ARM image: PyPI has no linux/aarch64 wheel of pyopenms 3.2.0, the
