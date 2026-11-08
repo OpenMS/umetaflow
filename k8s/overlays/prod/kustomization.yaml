@@ -37,7 +37,7 @@ patches:
     patch: |
       - op: replace
         path: /spec/resources/requests/storage
-        value: 100Gi
+        value: 20T
   - target:
       kind: IngressRoute
       name: streamlit-traefik

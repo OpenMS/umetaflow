@@ -46,6 +46,11 @@ patches:
       - op: replace
         path: /spec/storageClassName
         value: openms-manila-nfs
+      # The kind jobs need a Gi request (they rewrite it to 1Gi for the
+      # nfs-provisioner); prod's S3 quota is 20T, so give kind its size here.
+      - op: replace
+        path: /spec/resources/requests/storage
+        value: 1Gi
   - path: worker-resources.yaml
     target:
       kind: Deployment
