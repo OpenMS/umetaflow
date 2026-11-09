@@ -45,8 +45,9 @@ function embeddedPythonDir(payload) {
 }
 
 // Same environment the MSI's .bat file set up: TOPP tools next to app.py,
-// OPENMS_DATA_PATH pointing at share/OpenMS, and every THIRDPARTY tool folder
-// (Comet, Percolator, Sirius, ...) on PATH. The bundled interpreter and the
+// OPENMS_DATA_PATH pointing at share/OpenMS, every THIRDPARTY tool folder
+// (Comet, Percolator, Sirius, ...) on PATH, and DOTNET_ROOT at the bundled
+// .NET runtime when there is one. The bundled interpreter and the
 // console scripts of its packages (pip --target puts them in
 // Lib/site-packages/bin) come first too, so a workflow that calls `python` or
 // a tool such as `pyprophet` finds the bundled one.
@@ -77,6 +78,15 @@ function appEnvironment(payload, workspacesDir) {
     }
   }
   env[pathKey] = [...extraPath, env[pathKey] || ""].join(path.delimiter);
+
+  // The .NET runtime FileConverter's built-in Thermo .raw reader starts in its
+  // own process (macOS, Linux; electron/scripts/stage-dotnet.sh). Without
+  // DOTNET_ROOT it only looks in the system locations, where users rarely have one.
+  const dotnetRoot = path.join(payload, "dotnet");
+  if (fs.existsSync(dotnetRoot)) {
+    env.DOTNET_ROOT = dotnetRoot;
+    env.DOTNET_CLI_TELEMETRY_OPTOUT = "1";
+  }
 
   if (workspacesDir) env.LOCAL_WORKSPACES_DIR = workspacesDir;
   env.PYTHONUNBUFFERED = "1";
