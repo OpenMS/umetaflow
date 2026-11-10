@@ -30,7 +30,7 @@ On the left side of this page you can define a workspace where all your data inc
 Upload `mzML` files via the **File Upload** tab. The data will be stored in your workspace. With the web app you can upload only one file at a time.
 Locally there is no limit in files. However, it is recommended to upload large number of files by specifying the path to a directory containing the files.
 
-The table on the **File Upload** page lists your uploaded files. Tick a file in its **use in workflows** column to analyse it: **UmetaFlow** and **Extracted Ion Chromatograms** use the ticked files.
+The table on the **File Upload** page lists your uploaded files. A new file is ticked in its **use in workflows** column, so it is analysed; untick the files you want to leave out. **UmetaFlow** and **Extracted Ion Chromatograms** use the ticked files.
 
 Result files are available via specified download buttons or, if run locally, within the workspace directory.
 
