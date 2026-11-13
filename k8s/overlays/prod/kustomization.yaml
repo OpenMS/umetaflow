@@ -22,7 +22,7 @@ images:
   - name: openms-streamlit
     newName: ghcr.io/openms/umetaflow
     # The current release. Argo CD Image Updater moves the running app to each
-    # new release (k8s/argocd/image-updater.yaml); the release-app skill keeps
+    # new release (its ImageUpdater is cluster configuration); the release-app skill keeps
     # this tag current so a re-created Application starts from it.
     newTag: v2.1.0-full
 
