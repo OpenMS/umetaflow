@@ -275,6 +275,36 @@ def test_a_run_that_adds_files_joins_the_earlier_runs_experiment(tmp_path):
     assert [r["id"] for r in runs.experiments()] == [added]
 
 
+def _example_merge_feature_tables():
+    """The template's example workflow helper; an app's own workflow may lack it."""
+    try:
+        import src.Workflow as workflow
+    except ModuleNotFoundError as e:
+        if e.name != "src.Workflow":
+            raise
+        pytest.skip("this app has no src/Workflow.py")
+    if not hasattr(workflow, "merge_feature_tables"):
+        pytest.skip("this app's workflow has no merge_feature_tables")
+    return workflow.merge_feature_tables
+
+
+def test_merge_feature_tables_matches_features_of_added_runs():
+    import pandas as pd
+
+    merge_feature_tables = _example_merge_feature_tables()
+
+    cols = ["charge", "rt", "mz", "quality"]
+    first = pd.DataFrame([[1, 100.0, 300.0, 1, 10.0], [1, 200.0, 400.0, 1, 20.0]],
+                         columns=cols + ["a.mzML"], index=["f1", "f2"])
+    added = pd.DataFrame([[1, 105.0, 300.001, 1, 11.0], [1, 500.0, 600.0, 1, 30.0]],
+                         columns=cols + ["c.mzML"], index=["g1", "g2"])
+    merged = merge_feature_tables([first, added])
+    assert list(merged.columns) == cols + ["a.mzML", "c.mzML"]
+    assert merged.loc["f1", "c.mzML"] == 11.0  # within 10 ppm and 30 s
+    assert pd.isna(merged.loc["f2", "c.mzML"])
+    assert pd.isna(merged.loc["g2", "a.mzML"]) and merged.loc["g2", "c.mzML"] == 30.0
+
+
 def test_a_delete_cut_short_keeps_the_experiment_together(tmp_path, monkeypatch):
     runs = RunManager(tmp_path)
     ids = []
@@ -297,6 +327,20 @@ def test_a_delete_cut_short_keeps_the_experiment_together(tmp_path, monkeypatch)
     monkeypatch.setattr(runs, "_write", write)
     assert runs.delete(first)
     assert runs.experiment(third) == [added, third]
+
+
+def test_merge_feature_tables_updates_one_of_two_features_with_the_same_label():
+    import pandas as pd
+
+    merge_feature_tables = _example_merge_feature_tables()
+
+    cols = ["charge", "rt", "mz", "quality"]
+    first = pd.DataFrame([[1, 100.0, 300.0, 1, 10.0], [1, 100.0, 300.02, 1, 20.0]],
+                         columns=cols + ["a.mzML"], index=["300.0@100", "300.0@100"])
+    added = pd.DataFrame([[1, 101.0, 300.0001, 1, 11.0]], columns=cols + ["c.mzML"], index=["g1"])
+    merged = merge_feature_tables([first, added])
+    assert merged["c.mzML"].iloc[0] == 11.0
+    assert pd.isna(merged["c.mzML"].iloc[1])
 
 
 def test_deleting_the_first_run_keeps_finished_additions_selectable(tmp_path):
