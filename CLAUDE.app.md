@@ -21,7 +21,7 @@ UmetaFlow's own guidance, imported by the template-owned `CLAUDE.md` (which desc
 
 ## Deployment
 
-`k8s/overlays/prod` deploys to `umetaflow.webapps.openms.de` / `.org` (name prefix `umetaflow-`, image `ghcr.io/openms/umetaflow`, release tags `vX.Y.Z-full`), and `k8s/argocd/` holds the Argo CD Application and ImageUpdater. App values (hosts, Redis URL, share size, resources) are patches in the overlay, never edits in `k8s/base` or `k8s/components`.
+`k8s/overlays/prod` deploys to `umetaflow.webapps.openms.de` / `.org` (name prefix `umetaflow-`, image `ghcr.io/openms/umetaflow`, release tags `vX.Y.Z-full`). Its Argo CD Application and ImageUpdater are cluster configuration, kept outside this repository. App values (hosts, Redis URL, share size, resources) are patches in the overlay, never edits in `k8s/base` or `k8s/components`.
 
 ## Conventions & gotchas
 
