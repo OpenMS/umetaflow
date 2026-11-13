@@ -43,7 +43,7 @@ def test_build_feature_table_rows_follow_matrix():
     assert table["feature"].tolist() == ["235.1189@301.23", "180.06@120.04", "755.3931@540.12"]
     assert table.columns.tolist() == [
         "feature", "m/z", "RT (s)", "charge", "adduct", "found in", "max intensity",
-        "annotated by", "re-quantified", "Blank", "Treatment",
+        "annotated by", "tags", "re-quantified", "Blank", "Treatment",
     ]
     # Missing and zero intensities both count as not found
     assert table["found in"].tolist() == [2, 1, 1]

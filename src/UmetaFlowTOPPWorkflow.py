@@ -1291,6 +1291,8 @@ class Workflow(WorkflowManager):
         if explorer is None:
             return
         metabolite = explorer.selected()
+        if metabolite is not None:
+            feature_tags_editor(metabolite)
 
         c1, c2 = st.columns(2)
         with c1:
