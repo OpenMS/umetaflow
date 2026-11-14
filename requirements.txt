@@ -5,7 +5,7 @@
 #    pip-compile --output-file=requirements.txt pyproject.toml
 #
 captcha==0.7.1
-numpy==1.24.4
+numpy==2.5.4
 plotly==6.0.0
 psutil==7.2.2
 pyopenms==3.2.0
