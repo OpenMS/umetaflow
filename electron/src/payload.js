@@ -80,7 +80,7 @@ function appEnvironment(payload, workspacesDir) {
   env[pathKey] = [...extraPath, env[pathKey] || ""].join(path.delimiter);
 
   // The .NET runtime FileConverter's built-in Thermo .raw reader starts in its
-  // own process (macOS, Linux; electron/scripts/stage-dotnet.sh). Without
+  // own process (electron/scripts/stage-dotnet.sh). Without
   // DOTNET_ROOT it only looks in the system locations, where users rarely have one.
   const dotnetRoot = path.join(payload, "dotnet");
   if (fs.existsSync(dotnetRoot)) {
@@ -113,10 +113,14 @@ function freePort() {
   });
 }
 
-// Start `streamlit run app.py local` bound to loopback on the given port.
-function startStreamlit({ payload, port, env, logStream }) {
-  const args = [
-    "-m", "streamlit", "run", "app.py", "local",
+// Arguments for `streamlit run app.py local` bound to loopback on the given
+// port. It goes through src/streamlit_launcher.py, which imports polars on the
+// main thread first: imported first in a Streamlit script thread that later
+// exits, polars can crash with an access violation on Windows (polars issues
+// #29883 and #30362).
+function streamlitArgs(port) {
+  return [
+    "-m", "src.streamlit_launcher", "run", "app.py", "local",
     "--server.headless", "true",
     "--server.address", "127.0.0.1",
     "--server.port", String(port),
@@ -125,7 +129,11 @@ function startStreamlit({ payload, port, env, logStream }) {
     // offers "File change, Rerun" whenever something touches the folder.
     "--server.fileWatcherType", "none",
   ];
-  const child = spawn(pythonExecutable(payload), args, {
+}
+
+// Start Streamlit (see streamlitArgs) in the payload folder.
+function startStreamlit({ payload, port, env, logStream }) {
+  const child = spawn(pythonExecutable(payload), streamlitArgs(port), {
     cwd: payload,
     env,
     windowsHide: true,
@@ -200,5 +208,6 @@ module.exports = {
   pythonExecutable,
   readSettings,
   startStreamlit,
+  streamlitArgs,
   waitForServer,
 };
