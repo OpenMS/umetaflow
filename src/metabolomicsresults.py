@@ -4,8 +4,6 @@ import shutil
 import tempfile
 import zipfile
 
-from rdkit import Chem
-from rdkit.Chem.Draw import rdMolDraw2D
 
 import pandas as pd
 import numpy as np
@@ -265,6 +263,10 @@ def draw_structure(molecule, theme="light", size=(400, 300)):
     """
     if molecule is None:
         return None
+    # rdkit only where a structure is drawn: imported at the top it cost
+    # every page of the workflow about 0.6 s on its first load
+    from rdkit.Chem.Draw import rdMolDraw2D
+
     drawer = rdMolDraw2D.MolDraw2DCairo(*size)
     opts = drawer.drawOptions()
     if theme == "dark":
@@ -305,6 +307,8 @@ def spectralmatching_summary(s):
         with c2:
             if "smiles" in row.index:
                 if row["smiles"] != "None":
+                    from rdkit import Chem
+
                     show_structure(
                         Chem.MolFromSmiles(row["smiles"]), use_container_width=True
                     )
@@ -333,6 +337,8 @@ def sirius_summary(s):
         st.dataframe(s, use_container_width=True)
     with c2:
         if "InChI" in s.index:
+            from rdkit import Chem
+
             show_structure(Chem.MolFromInchi(s["InChI"]), width=500)
 
 
@@ -347,6 +353,8 @@ def ms2query_summary(s):
         st.dataframe(s, use_container_width=True)
     with c2:
         if "smiles" in s.index:
+            from rdkit import Chem
+
             show_structure(Chem.MolFromSmiles(s["smiles"]), use_container_width=True)
 
 
