@@ -20,6 +20,7 @@ from openms_insight import LinePlot, MirrorPlot, StateManager
 from src.common.common import show_fig, load_parquet, export_folder_input
 from src.common.insight_tables import cache_id_for, cache_ready, drop_stale_caches
 from src.feature_explorer import FeatureExplorer
+from src.feature_tags import all_tags, apply_tag_filter, clean_tags, load_tags, set_feature_tags
 from src.ms2_viewer import LIBRARY_SIDE, QUERY_SIDE, load_ms2_data, peaks_frame
 
 
@@ -30,7 +31,8 @@ def add_color_column(df):
 
 
 @st.dialog("🔎 Filter Feature Matrix")
-def filter_dialog(df):
+def filter_dialog(df, tags=None):
+    tags = tags or {}
     len_unfiltered = len(df)
     mz = st.slider(
         "*m/z* range",
@@ -56,6 +58,20 @@ def filter_dialog(df):
     c1, c2 = st.columns(2)
     filter_annotation = c1.toggle("filter for annotation", False)
     filter_annotation_type = c2.selectbox("annotation type", ["all", "Spectral Matcher", "SIRIUS", "MS2Query"], 0)
+    c1, c2 = st.columns(2)
+    tag_choice = c1.multiselect(
+        "tagged with any of",
+        all_tags(tags),
+        placeholder="all features" if tags else "no tags yet",
+        disabled=not tags,
+        help="Tag features under the table: select a feature, then add tags such as contaminant or standard.",
+    )
+    exclude_tags = c2.multiselect(
+        "leave out features tagged",
+        all_tags(tags),
+        placeholder="none" if tags else "no tags yet",
+        disabled=not tags,
+    )
     # filter text
     filter_text = ""
     if rt[0] > df["RT"].min():
@@ -81,6 +97,10 @@ def filter_dialog(df):
             [c for c in df.columns if any([c.startswith(k) for k in mask])]
         ].replace('', pd.NA).dropna(how="all")
         df = df.loc[df_annotation.index, :]
+    if tag_choice:
+        filter_text += f" **tags:** {', '.join(tag_choice)};"
+    if exclude_tags:
+        filter_text += f" **without tags:** {', '.join(exclude_tags)};"
     if charge != "all":
         filter_text += f" **charge** = {charge};"
         df = df[df["charge"] == int(charge)]
@@ -89,6 +109,10 @@ def filter_dialog(df):
         df = df[df["adduct"] == adduct]
     df = df[(df["mz"] >= mz[0]) & (df["mz"] <= mz[1])]
     df = df[(df["RT"] >= rt[0]) & (df["RT"] <= rt[1])]
+    # Tag criteria are kept apart and applied again on every rerun (see
+    # metabolite_selection), so later tag edits show up in the filtered table
+    base = df
+    df = apply_tag_filter(base, tags, tag_choice, exclude_tags)
     if df.empty:
         st.warning(
             "⚠️ Feature Matrix is empty after filtering. Filter will not be applied."
@@ -99,7 +123,8 @@ def filter_dialog(df):
 
     if c2.button("Apply", type="primary", use_container_width=True):
         if len(df) != len_unfiltered and not df.empty:
-            st.session_state["feature-matrix-filtered"] = df
+            st.session_state["feature-matrix-filtered"] = base
+            st.session_state["fm-tag-filter"] = (list(tag_choice), list(exclude_tags))
             st.session_state["fm-filter-info"] = filter_text.rstrip(";")
         st.rerun()
 
@@ -113,19 +138,25 @@ def metabolite_selection():
     if df.empty:
         st.error("FeatureMatrix is empty.")
         return None
+    tags = load_tags(st.session_state.results_dir, df)
 
     c1, c2, c3 = st.columns([0.5, 0.25, 0.25])
     if "feature-matrix-filtered" in st.session_state:
         if c2.button("❌ Reset", use_container_width=True):
             del st.session_state["feature-matrix-filtered"]
             del st.session_state["fm-filter-info"]
+            st.session_state.pop("fm-tag-filter", None)
             st.rerun()
         st.success(st.session_state["fm-filter-info"])
     if c3.button("🔎 Filter", use_container_width=True):
-        filter_dialog(df)
+        filter_dialog(df, tags)
     if "feature-matrix-filtered" in st.session_state:
         if not st.session_state["feature-matrix-filtered"].empty:
-            df = st.session_state["feature-matrix-filtered"]
+            include, exclude = st.session_state.get("fm-tag-filter", ([], []))
+            df = apply_tag_filter(st.session_state["feature-matrix-filtered"], tags, include, exclude)
+            if df.empty:
+                st.warning("No feature matches the filter after the latest tag changes. Reset or change the filter.")
+                return None
     c1.markdown(f"**Feature Matrix** ({df.shape[0]} metabolites)")
     st.caption(
         "Click a feature in the table or in the feature map (retention time vs *m/z*, "
@@ -134,10 +165,32 @@ def metabolite_selection():
     )
 
     explorer = FeatureExplorer(
-        df, cache_dir=Path(st.session_state.results_dir, "insight-cache")
+        df, cache_dir=Path(st.session_state.results_dir, "insight-cache"), tags=tags
     )
     explorer.table()
     return explorer
+
+
+def feature_tags_editor(metabolite):
+    """Tags of the selected feature (MZmine row tags), saved with the results."""
+    results_dir = st.session_state.results_dir
+    tags = load_tags(results_dir)
+    # Only tags whose stored m/z and RT match this feature, as in the table
+    current = load_tags(results_dir, metabolite.to_frame().T).get(str(metabolite.name), [])
+    chosen = st.multiselect(
+        f"🏷️ Tags of feature {metabolite.name}",
+        options=sorted(set(all_tags(tags)) | set(current), key=str.casefold),
+        default=current,
+        accept_new_options=True,
+        placeholder="Add a tag, e.g. contaminant, standard, follow up",
+        key=f"feature-tags-{metabolite.name}",
+        help="Tags show in the table's tags column and can be filtered on with 🔎 Filter. "
+        "They are kept with these results and dropped when the workflow runs again.",
+    )
+    # The widget keeps the pick order; the saved list is cleaned and sorted
+    if clean_tags(chosen) != current:
+        set_feature_tags(results_dir, metabolite, chosen)
+        st.rerun()
 
 
 def metabolite_metrics(metabolite):
@@ -429,6 +482,8 @@ This page provides a detailed overview of the analysis results for your UmetaFlo
 **1. Feature table and feature map**
 
 Click a row in the feature table, or a point in the feature map (retention time vs *m/z*), to select a metabolite. Both views stay in sync. The table has one intensity column per sample, the number of samples a feature was found in, and which tools annotated it. Sort or filter by any column header, and download the filtered table as CSV.
+
+Tag the selected feature under the table (for example *contaminant*, *standard* or *follow up*). Tags appear in the table's **tags** column, and **🔎 Filter** shows or leaves out features by tag. Tags are saved with the results and dropped when the workflow runs again.
 
 The chromatograms of the selected feature in every sample are shown next to the feature map.
 
