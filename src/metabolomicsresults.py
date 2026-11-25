@@ -7,8 +7,8 @@ import zipfile
 
 import pandas as pd
 import numpy as np
-import plotly.express as px
 import plotly.graph_objects as go
+from plotly.colors import qualitative
 from itertools import cycle
 
 import json
@@ -22,7 +22,7 @@ from src.ms2_viewer import LIBRARY_SIDE, QUERY_SIDE, load_ms2_data, peaks_frame
 
 
 def add_color_column(df):
-    color_cycle = cycle(px.colors.qualitative.Plotly)
+    color_cycle = cycle(qualitative.Plotly)
     df["color"] = [next(color_cycle) for _ in range(len(df))]
     return df
 
@@ -230,7 +230,9 @@ def get_feature_intensity_plot(metabolite):
     # Create a mapping from sample to color
     color_map = dict(zip(df["sample"], df["color"]))
 
-    # Plot bar chart
+    # Plot bar chart (plotly express costs about 0.3 s on first import)
+    import plotly.express as px
+
     fig = px.bar(
         df, x="sample", y="intensity", color="sample", color_discrete_map=color_map
     )
