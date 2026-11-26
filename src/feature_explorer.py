@@ -11,6 +11,7 @@ import pandas as pd
 import streamlit as st
 from openms_insight import Heatmap, StateManager, Table
 
+from src.feature_tags import tags_column
 from src.common.insight_tables import (
     ROW_FIELD,
     cache_id_for,
@@ -50,12 +51,13 @@ def annotation_sources(df: pd.DataFrame) -> pd.Series:
     return found.apply(lambda row: ", ".join(k for k, v in row.items() if v), axis=1)
 
 
-def build_feature_table(df: pd.DataFrame) -> pd.DataFrame:
+def build_feature_table(df: pd.DataFrame, tags: dict[str, list[str]] | None = None) -> pd.DataFrame:
     """Display table for the feature explorer, one row per consensus feature.
 
     Columns: feature id, m/z, RT, charge, adduct (if detected), number of
     samples the feature was found in, maximum intensity, annotation sources,
-    re-quantified flag and one intensity column per sample (named by file stem).
+    user tags (``tags``: feature id -> list of tags), re-quantified flag and
+    one intensity column per sample (named by file stem).
     Row order follows ``df``, so row ``i`` of the result is ``df.iloc[i]``.
     """
     samples = sample_columns(df)
@@ -73,6 +75,7 @@ def build_feature_table(df: pd.DataFrame) -> pd.DataFrame:
     table["found in"] = (intensities > 0).sum(axis=1).to_numpy()
     table["max intensity"] = intensities.max(axis=1).round(0).to_numpy()
     table["annotated by"] = annotation_sources(df).to_numpy()
+    table["tags"] = tags_column(df, tags or {}).to_numpy()
     if "re-quantified" in df.columns:
         table["re-quantified"] = df["re-quantified"].fillna(False).astype(bool).to_numpy()
     # Sample columns last: when the table is too wide, Tabulator folds the
@@ -137,14 +140,23 @@ class FeatureExplorer:
     ``df`` (the table preselects its first row, the most intense feature).
     """
 
-    def __init__(self, df: pd.DataFrame, cache_dir: Path | None = None, key: str = "umetaflow"):
+    def __init__(
+        self,
+        df: pd.DataFrame,
+        cache_dir: Path | None = None,
+        key: str = "umetaflow",
+        tags: dict[str, list[str]] | None = None,
+    ):
         self.df = df
         self.key = key
         self.cache_dir = Path(cache_dir) if cache_dir else default_cache_dir()
-        self.table_id, self.map_id = _ensure_caches(build_feature_table(df), self.cache_dir)
-        # One selection state per table content: a selected row index of the
-        # unfiltered matrix must not select a different feature after filtering
-        self.state = StateManager(f"{key}_feature_explorer_{self.table_id}")
+        table = build_feature_table(df, tags)
+        self.table_id, self.map_id = _ensure_caches(table, self.cache_dir)
+        # One selection state per set of rows: a selected row index of the
+        # unfiltered matrix must not select a different feature after filtering.
+        # Tags are left out, so tagging the selected feature keeps it selected.
+        rows_id = cache_id_for("feature_rows", table.drop(columns="tags"))
+        self.state = StateManager(f"{key}_feature_explorer_{rows_id}")
 
     def table(self, height: int = 420) -> None:
         Table(cache_id=self.table_id, cache_path=str(self.cache_dir))(
