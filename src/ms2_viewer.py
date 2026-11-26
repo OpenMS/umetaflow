@@ -22,7 +22,6 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import polars as pl
-from pyteomics import mgf
 
 QUERY_SIDE = "ms2_query"
 LIBRARY_SIDE = "ms2_library"
@@ -52,6 +51,10 @@ class MS2Data:
 
 
 def _read_mgf(path: Path) -> list[dict]:
+    # imported here: only a results page with MS2 spectra reads an mgf file, and
+    # importing pyteomics cost about 0.2 s of the first page after a restart
+    from pyteomics import mgf
+
     with mgf.MGF(str(path), use_header=False, convert_arrays=1, read_charges=False) as reader:
         return list(reader)
 
